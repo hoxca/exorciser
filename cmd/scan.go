@@ -213,7 +213,6 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	cleanFrames := make([][]float32, 0, len(cleanPaths))
 	cleanFrames = append(cleanFrames, ref)
 	cleanFrames = append(cleanFrames, rest...)
-	rest = nil
 
 	clean, err := stack.Average(cleanFrames, w, h, stack.Options{
 		Sigma:      opts.sigma,
@@ -232,7 +231,7 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		return fmt.Errorf("write %s: %w", stackCleanName, err)
 	}
 	slog.Info("master written", "path", filepath.Join(opts.outputDir, stackCleanName))
-	cleanFrames = nil
+	clear(cleanFrames)
 	runtime.GC()
 
 	// Stars are common to both masters, so their residuals are the largest
@@ -282,7 +281,7 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		return fmt.Errorf("write %s: %w", stackGhostName, err)
 	}
 	slog.Info("master written", "path", filepath.Join(opts.outputDir, stackGhostName))
-	ghostFrames = nil
+	clear(ghostFrames)
 	runtime.GC()
 
 	if err := ctx.Err(); err != nil {
