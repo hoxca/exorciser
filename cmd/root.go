@@ -45,6 +45,9 @@ whether the strongest feature in a window is significant.
 scan builds a ghost master and a clean master from a detection report, subtracts
 them, and catalogues every diffuse artefact in the difference.
 
+annotate draws the catalogue on an RGB copy of the ghost master, with a red
+cross at every artefact position.
+
 Frames are analysed after star alignment, so positions are in registered pixels
 and move with each frame's alignment offset.`,
 		Version:       fmt.Sprintf("%s (built %s)", Version, BuildDate),
@@ -59,6 +62,7 @@ and move with each frame's alignment offset.`,
 
 	root.AddCommand(newDetectCmd())
 	root.AddCommand(newScanCmd())
+	root.AddCommand(newAnnotateCmd())
 	return root
 }
 

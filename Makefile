@@ -98,6 +98,10 @@ detect: build ; $(info $(M) detecting diffuse artefacts…) @ ## Detect artefact
 scan: build ; $(info $(M) scanning a stacked difference…) @ ## Catalogue artefacts in a stacked difference
 	$Q $(BIN)/$(BINNAME) scan $(SCAN_ARGS)
 
+.PHONY: annotate
+annotate: build ; $(info $(M) annotating the ghost master…) @ ## Draw detected artefacts on the ghost master
+	$Q $(BIN)/$(BINNAME) annotate $(ANNOTATE_ARGS)
+
 .PHONY: winbuild
 winbuild: | $(BIN) ; $(info $(M) building executable…) @ ## Build program binary
 	$Q GOOS=windows GOARCH=amd64 $(GO) build \

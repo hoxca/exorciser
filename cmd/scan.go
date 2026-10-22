@@ -64,6 +64,9 @@ declared bounds.
 The difference is searched with Gaussian matched filters at several scales.
 Every local maximum whose absolute signal-to-noise ratio reaches --min-snr is
 numbered in artefacts.csv, strongest first, with its registered pixel position.
+Run annotate afterwards to draw the catalogue on an RGB copy of the ghost
+master.
+
 Stars are common to both groups, but their subtraction residuals dominate the
 difference, so they are masked with a dilated local-mean mask built from the
 clean master. The ghost is absent from that master and survives. The outer
