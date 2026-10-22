@@ -1,4 +1,5 @@
 bin/
 output/
 img/
+test/
 .DS_Store
