@@ -94,6 +94,10 @@ build: | $(BIN) ; $(info $(M) building executable…) @ ## Build program binary
 detect: build ; $(info $(M) detecting diffuse artefacts…) @ ## Detect artefacts against a reference frame
 	$Q $(BIN)/$(BINNAME) detect $(DETECT_ARGS)
 
+.PHONY: scan
+scan: build ; $(info $(M) scanning a stacked difference…) @ ## Catalogue artefacts in a stacked difference
+	$Q $(BIN)/$(BINNAME) scan $(SCAN_ARGS)
+
 .PHONY: winbuild
 winbuild: | $(BIN) ; $(info $(M) building executable…) @ ## Build program binary
 	$Q GOOS=windows GOARCH=amd64 $(GO) build \

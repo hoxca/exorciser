@@ -523,67 +523,13 @@ func squared(k []float64) []float64 {
 // the square are treated as zero; the kernels used here never reach the window
 // interior from outside the support square.
 func convSep(src []float64, e int, kernel []float64) []float64 {
-	r := len(kernel) / 2
-	tmp := make([]float64, len(src))
-	out := make([]float64, len(src))
-
-	for y := 0; y < e; y++ {
-		row := y * e
-		for x := 0; x < e; x++ {
-			var sum float64
-			for k := -r; k <= r; k++ {
-				xx := x + k
-				if xx < 0 || xx >= e {
-					continue
-				}
-				sum += src[row+xx] * kernel[k+r]
-			}
-			tmp[row+x] = sum
-		}
-	}
-	for y := 0; y < e; y++ {
-		for x := 0; x < e; x++ {
-			var sum float64
-			for k := -r; k <= r; k++ {
-				yy := y + k
-				if yy < 0 || yy >= e {
-					continue
-				}
-				sum += tmp[yy*e+x] * kernel[k+r]
-			}
-			out[y*e+x] = sum
-		}
-	}
-	return out
+	return convolvePlane(src, e, e, kernel, 1)
 }
 
 // dilateInvalid clears valid pixels within r pixels of an invalid one, so a
 // masked star does not bleed through the kernel.
 func dilateInvalid(valid []float64, e, r int) {
-	bad := make([]bool, len(valid))
-	for i, v := range valid {
-		bad[i] = v == 0
-	}
-	for y := 0; y < e; y++ {
-		for x := 0; x < e; x++ {
-			if !bad[y*e+x] {
-				continue
-			}
-			for dy := -r; dy <= r; dy++ {
-				yy := y + dy
-				if yy < 0 || yy >= e {
-					continue
-				}
-				for dx := -r; dx <= r; dx++ {
-					xx := x + dx
-					if xx < 0 || xx >= e {
-						continue
-					}
-					valid[yy*e+xx] = 0
-				}
-			}
-		}
-	}
+	dilateInvalidPlane(valid, e, e, r)
 }
 
 // maskDilation is how far, in pixels, a masked pixel spreads to its neighbours.

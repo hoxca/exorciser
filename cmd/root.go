@@ -36,13 +36,17 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "exorciser",
 		Short: "Detect diffuse ghost artefacts in astronomical images",
-		Long: `exorciser compares monochrome astronomical frames in XISF format with a
-ghost-free reference frame. After normalising and removing a local background,
-it matched-filters the residual in a square window and reports whether a
-diffuse artefact is present, how significant it is, and where its centre lies.
+		Long: `exorciser detects diffuse ghost artefacts in monochrome astronomical
+frames in XISF format.
 
-Frames are analysed after star alignment, so the reported peak position is in
-registered pixels and moves with each frame's alignment offset.`,
+detect compares every frame with a ghost-free reference frame and reports
+whether the strongest feature in a window is significant.
+
+scan builds a ghost master and a clean master from a detection report, subtracts
+them, and catalogues every diffuse artefact in the difference.
+
+Frames are analysed after star alignment, so positions are in registered pixels
+and move with each frame's alignment offset.`,
 		Version:       fmt.Sprintf("%s (built %s)", Version, BuildDate),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -54,6 +58,7 @@ registered pixels and moves with each frame's alignment offset.`,
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "log debugging detail")
 
 	root.AddCommand(newDetectCmd())
+	root.AddCommand(newScanCmd())
 	return root
 }
 
