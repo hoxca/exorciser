@@ -6,15 +6,73 @@ import (
 	"math"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 )
+
+// Polarity selects which sign of difference peak Scan reports.
+type Polarity uint8
+
+const (
+	// PolarityBoth reports bright and dark features.
+	PolarityBoth Polarity = iota
+	// PolarityPositive reports features brighter than the clean master.
+	PolarityPositive
+	// PolarityNegative reports features darker than the clean master.
+	PolarityNegative
+)
+
+// ParsePolarity converts a polarity name to its enum value. It accepts "both",
+// "positive" and "negative", ignoring case and surrounding space.
+func ParsePolarity(s string) (Polarity, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "both":
+		return PolarityBoth, nil
+	case "positive":
+		return PolarityPositive, nil
+	case "negative":
+		return PolarityNegative, nil
+	default:
+		return 0, fmt.Errorf("polarity must be both, positive or negative, got %q", s)
+	}
+}
+
+// String returns the name used by ParsePolarity.
+func (p Polarity) String() string {
+	switch p {
+	case PolarityBoth:
+		return "both"
+	case PolarityPositive:
+		return "positive"
+	case PolarityNegative:
+		return "negative"
+	default:
+		return fmt.Sprintf("Polarity(%d)", uint8(p))
+	}
+}
+
+func (p Polarity) accepts(snr float64) bool {
+	switch p {
+	case PolarityBoth:
+		return true
+	case PolarityPositive:
+		return snr > 0
+	case PolarityNegative:
+		return snr < 0
+	default:
+		return false
+	}
+}
 
 // ScanOptions configures a blind search of a whole image.
 type ScanOptions struct {
 	// Scales are the Gaussian sigmas, in pixels, tried by the matched filter.
 	Scales []float64
-	// MinSNR is the significance at which a peak is reported.
+	// MinSNR is the absolute significance at which a peak is reported.
 	MinSNR float64
+	// Polarity selects which sign of peak is reported. The zero value reports
+	// both bright and dark features.
+	Polarity Polarity
 	// Stride is the subsampling step used to estimate the background.
 	Stride int
 	// Workers is the number of rows processed concurrently.
@@ -44,6 +102,11 @@ func (o ScanOptions) validate() error {
 	if o.MinSNR <= 0 || !finite(o.MinSNR) {
 		return fmt.Errorf("minimum SNR must be a positive number, got %v", o.MinSNR)
 	}
+	switch o.Polarity {
+	case PolarityBoth, PolarityPositive, PolarityNegative:
+	default:
+		return fmt.Errorf("unknown peak polarity %v", o.Polarity)
+	}
 	if o.Stride < 1 {
 		return fmt.Errorf("background stride must be positive, got %d", o.Stride)
 	}
@@ -72,8 +135,9 @@ type Artefact struct {
 //
 // It removes a robust background plane, masks non-finite pixels and dilates the
 // mask so dead columns cannot feed the filter, then matched-filters the residual
-// at every scale. A peak is reported when its signal-to-noise ratio reaches
-// MinSNR. Peaks closer than the kernel radius are merged, strongest first.
+// at every scale. A peak is reported when the absolute value of its
+// signal-to-noise ratio reaches MinSNR and its sign matches Polarity. Peaks
+// closer than the kernel radius are merged, strongest first.
 //
 // Asteroids, stars and other objects common to both stacks cancel before the
 // search. A ghost, which differs between them, does not. No amplitude threshold
@@ -405,7 +469,7 @@ func scanScale(res, valid []float64, w, h int, noise, scale float64, opts ScanOp
 				continue
 			}
 			snr := signal[i] / (noise * math.Sqrt(noiseSq[i]))
-			if math.Abs(snr) < opts.MinSNR {
+			if math.Abs(snr) < opts.MinSNR || !opts.Polarity.accepts(snr) {
 				continue
 			}
 			candidates = append(candidates, Artefact{

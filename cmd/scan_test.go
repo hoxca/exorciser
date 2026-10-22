@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hoxca/exorciser/internal/detect"
 	"github.com/hoxca/exorciser/internal/report"
 	"github.com/hoxca/xisf"
 )
@@ -28,6 +29,7 @@ func TestScanRejectsBadFlags(t *testing.T) {
 		{name: "min frames above count", args: []string{"--min-frames", "20"}},
 		{name: "workers", args: []string{"--workers", "0"}},
 		{name: "min snr", args: []string{"--min-snr", "0"}},
+		{name: "polarity", args: []string{"--polarity", "bright"}},
 		{name: "margin", args: []string{"--margin", "-1"}},
 		{name: "star sigma", args: []string{"--star-sigma", "0"}},
 		{name: "star dilation", args: []string{"--star-dilation", "-1"}},
@@ -264,6 +266,7 @@ func TestRunScanEndToEnd(t *testing.T) {
 		minFrames:    2,
 		workers:      2,
 		minSNR:       6,
+		polarity:     detect.PolarityPositive,
 		scales:       []float64{4, 8, 16},
 		margin:       16,
 		starSigma:    50,
@@ -291,6 +294,9 @@ func TestRunScanEndToEnd(t *testing.T) {
 
 	var found bool
 	for _, a := range artefacts {
+		if a.SNR <= 0 {
+			t.Errorf("positive-polarity scan reported non-positive snr %v at (%d,%d)", a.SNR, a.X, a.Y)
+		}
 		d := math.Hypot(float64(a.X-scanGhostX), float64(a.Y-scanGhostY))
 		if d < 8 {
 			found = true

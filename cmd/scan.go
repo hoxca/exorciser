@@ -36,6 +36,7 @@ type scanOptions struct {
 	minFrames    int
 	workers      int
 	minSNR       float64
+	polarity     detect.Polarity
 	scales       []float64
 	margin       int
 	starSigma    float64
@@ -44,7 +45,7 @@ type scanOptions struct {
 
 func newScanCmd() *cobra.Command {
 	opts := &scanOptions{}
-	var scales string
+	var scales, polarity string
 
 	cmd := &cobra.Command{
 		Use:   "scan [path...]",
@@ -62,8 +63,15 @@ from the first frame of the group, with Float32 samples and the template's
 declared bounds.
 
 The difference is searched with Gaussian matched filters at several scales.
-Every local maximum whose absolute signal-to-noise ratio reaches --min-snr is
-numbered in artefacts.csv, strongest first, with its registered pixel position.
+Every local maximum whose absolute signal-to-noise ratio reaches --min-snr and
+whose sign matches --polarity is numbered in artefacts.csv, strongest first,
+with its registered pixel position.
+
+--polarity both accepts bright and dark features. positive keeps only features
+brighter than the clean master; negative keeps only darker ones. Polarity is
+applied before peak merging, so a one-sided scan can report peaks that an
+opposite-sign peak would otherwise suppress.
+
 Run annotate afterwards to draw the catalogue on an RGB copy of the ghost
 master.
 
@@ -122,6 +130,12 @@ The reports are semicolon-delimited and use a decimal comma.`,
 			}
 			opts.scales = parsed
 
+			polarityMode, err := detect.ParsePolarity(polarity)
+			if err != nil {
+				return fmt.Errorf("--polarity: %w", err)
+			}
+			opts.polarity = polarityMode
+
 			roots := args
 			if len(roots) == 0 {
 				roots = []string{opts.input}
@@ -149,6 +163,8 @@ The reports are semicolon-delimited and use a decimal comma.`,
 		"number of frames decoded and rows processed concurrently")
 	flags.Float64Var(&opts.minSNR, "min-snr", 6,
 		"absolute significance at which a difference peak is reported")
+	flags.StringVar(&polarity, "polarity", "both",
+		"ghost polarity to report: both, positive or negative")
 	flags.StringVar(&scales, "ghost-sigma", "4,8,16",
 		"matched-filter scales in pixels, comma separated")
 	flags.IntVar(&opts.margin, "margin", 64,
@@ -296,13 +312,17 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("difference ready", "width", w, "height", h)
+	slog.Info("difference ready",
+		"width", w,
+		"height", h,
+		"polarity", opts.polarity.String())
 
 	found, err := detect.Scan(diff, w, h, detect.ScanOptions{
-		Scales:  opts.scales,
-		MinSNR:  opts.minSNR,
-		Workers: opts.workers,
-		Mask:    mask,
+		Scales:   opts.scales,
+		MinSNR:   opts.minSNR,
+		Polarity: opts.polarity,
+		Workers:  opts.workers,
+		Mask:     mask,
 	})
 	if err != nil {
 		return fmt.Errorf("scan difference: %w", err)

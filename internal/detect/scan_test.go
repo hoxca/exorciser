@@ -113,6 +113,127 @@ func TestScanFindsNegativeGhost(t *testing.T) {
 	}
 }
 
+func TestScanPolarity(t *testing.T) {
+	const w, h = 512, 512
+	plane := syntheticPlane(w, h, []injected{
+		{x: 140, y: 150, sigma: 8, amp: 0.03},
+		{x: 370, y: 360, sigma: 8, amp: -0.03},
+	}, 0.01, 11)
+
+	base := detect.ScanOptions{
+		Scales: []float64{4, 8, 16}, MinSNR: 6, Workers: 4,
+	}
+
+	tests := []struct {
+		name     string
+		polarity detect.Polarity
+		wantSign int
+		wantX    int
+		wantY    int
+	}{
+		{name: "positive", polarity: detect.PolarityPositive, wantSign: 1, wantX: 140, wantY: 150},
+		{name: "negative", polarity: detect.PolarityNegative, wantSign: -1, wantX: 370, wantY: 360},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := base
+			opts.Polarity = tt.polarity
+			arts, err := detect.Scan(plane, w, h, opts)
+			if err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			if len(arts) == 0 {
+				t.Fatal("Scan found no artefact")
+			}
+			found := false
+			for _, a := range arts {
+				if sign(a.SNR) != tt.wantSign {
+					t.Errorf("artefact %+v has the wrong sign for %s", a, tt.polarity)
+				}
+				if math.Abs(float64(a.X-tt.wantX)) <= 6 && math.Abs(float64(a.Y-tt.wantY)) <= 6 {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("no %s artefact near (%d,%d) in %v", tt.name, tt.wantX, tt.wantY, arts)
+			}
+		})
+	}
+
+	t.Run("both", func(t *testing.T) {
+		arts, err := detect.Scan(plane, w, h, base)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		var positive, negative bool
+		for _, a := range arts {
+			switch sign(a.SNR) {
+			case 1:
+				positive = true
+			case -1:
+				negative = true
+			}
+		}
+		if !positive || !negative {
+			t.Errorf("both-polarity scan found positive=%v negative=%v in %v", positive, negative, arts)
+		}
+	})
+}
+
+func TestParsePolarity(t *testing.T) {
+	tests := []struct {
+		in   string
+		want detect.Polarity
+		ok   bool
+	}{
+		{in: "both", want: detect.PolarityBoth, ok: true},
+		{in: "positive", want: detect.PolarityPositive, ok: true},
+		{in: "negative", want: detect.PolarityNegative, ok: true},
+		{in: " Positive ", want: detect.PolarityPositive, ok: true},
+		{in: "", ok: false},
+		{in: "bright", ok: false},
+	}
+	for _, tt := range tests {
+		got, err := detect.ParsePolarity(tt.in)
+		if tt.ok {
+			if err != nil {
+				t.Errorf("ParsePolarity(%q): %v", tt.in, err)
+				continue
+			}
+			if got != tt.want {
+				t.Errorf("ParsePolarity(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+			if got.String() != tt.want.String() {
+				t.Errorf("Polarity(%q).String() = %q, want %q", tt.in, got.String(), tt.want.String())
+			}
+		} else if err == nil {
+			t.Errorf("ParsePolarity(%q) = %v, want an error", tt.in, got)
+		}
+	}
+}
+
+func TestScanRejectsUnknownPolarity(t *testing.T) {
+	const w, h = 64, 64
+	plane := syntheticPlane(w, h, nil, 0.01, 12)
+	_, err := detect.Scan(plane, w, h, detect.ScanOptions{
+		Scales: []float64{4}, MinSNR: 6, Workers: 2, Polarity: detect.Polarity(99),
+	})
+	if err == nil {
+		t.Fatal("Scan accepted an unknown polarity")
+	}
+}
+
+func sign(v float64) int {
+	switch {
+	case v > 0:
+		return 1
+	case v < 0:
+		return -1
+	default:
+		return 0
+	}
+}
+
 func TestScanFindsStrongGhost(t *testing.T) {
 	const w, h = 512, 512
 	// Stacking raises a ghost by about sqrt(N); a bright ghost must not be
