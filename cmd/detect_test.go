@@ -199,6 +199,11 @@ func TestRunDetectOnSampleFiles(t *testing.T) {
 	}
 
 	input := filepath.Join("..", defaultInput)
+	// The sample frames are large and stay out of the repository, so a fresh
+	// clone has to skip this test rather than fail on the missing directory.
+	if _, err := os.Stat(input); os.IsNotExist(err) {
+		t.Skipf("sample frames are not checked in: %s is absent", input)
+	}
 	paths, err := collect([]string{input})
 	if err != nil {
 		t.Fatalf("collect: %v", err)
