@@ -20,7 +20,7 @@ func TestComposeDetected(t *testing.T) {
 		{N: 2, X: 0, Y: h - 1},
 	}
 
-	rgb, err := composeDetected(plane, w, h, artefacts, 3, 1)
+	rgb, err := composeDetected(plane, w, h, artefacts, 3, 1, 1)
 	if err != nil {
 		t.Fatalf("composeDetected: %v", err)
 	}
@@ -54,6 +54,11 @@ func TestComposeDetected(t *testing.T) {
 	checkRed(10, 8+3)
 	checkBackground(10+4, 8)
 
+	// The catalogue number is printed beside the cross: "1" to the right of
+	// (10,8), and "2" to the right of the clipped edge artefact.
+	checkRed(15, 11)
+	checkRed(4, 23)
+
 	// The edge artefact is clipped without wrapping or panicking.
 	checkRed(0, h-1)
 	checkRed(1, h-1)
@@ -62,11 +67,12 @@ func TestComposeDetected(t *testing.T) {
 
 func TestAnnotateOptionsValidate(t *testing.T) {
 	base := &annotateOptions{
-		image:     "output/stack_ghost.xisf",
-		artefacts: "output/artefacts.csv",
-		output:    "output/stack_detected.xisf",
-		arm:       12,
-		thickness: 3,
+		image:      "output/stack_ghost.xisf",
+		artefacts:  "output/artefacts.csv",
+		output:     "output/stack_detected.xisf",
+		arm:        12,
+		thickness:  3,
+		labelScale: 3,
 	}
 	if err := base.validate(); err != nil {
 		t.Fatalf("valid options: %v", err)
@@ -88,6 +94,12 @@ func TestAnnotateOptionsValidate(t *testing.T) {
 	thin.thickness = 0
 	if err := thin.validate(); err == nil {
 		t.Fatal("accepted a zero thickness")
+	}
+
+	smallLabel := *base
+	smallLabel.labelScale = -1
+	if err := smallLabel.validate(); err == nil {
+		t.Fatal("accepted a negative label scale")
 	}
 }
 
@@ -117,11 +129,12 @@ func TestRunAnnotate(t *testing.T) {
 
 	output := filepath.Join(dir, "stack_detected.xisf")
 	opts := &annotateOptions{
-		image:     image,
-		artefacts: artefactsPath,
-		output:    output,
-		arm:       4,
-		thickness: 3,
+		image:      image,
+		artefacts:  artefactsPath,
+		output:     output,
+		arm:        4,
+		thickness:  3,
+		labelScale: 1,
 	}
 	if err := runAnnotate(opts); err != nil {
 		t.Fatalf("runAnnotate: %v", err)
@@ -158,6 +171,10 @@ func TestRunAnnotate(t *testing.T) {
 	i := 10*w + 12
 	if red[i] != 1 || green[i] != 0 || blue[i] != 0 {
 		t.Errorf("centre = %v,%v,%v, want pure red", red[i], green[i], blue[i])
+	}
+	i = 13*w + 18
+	if red[i] != 1 || green[i] != 0 || blue[i] != 0 {
+		t.Errorf("label = %v,%v,%v, want pure red", red[i], green[i], blue[i])
 	}
 	i = 2*w + 2
 	if red[i] != 0.25 || green[i] != 0.25 || blue[i] != 0.25 {

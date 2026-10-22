@@ -16,11 +16,12 @@ import (
 const stackDetectedName = "stack_detected.xisf"
 
 type annotateOptions struct {
-	image     string
-	artefacts string
-	output    string
-	arm       int
-	thickness int
+	image      string
+	artefacts  string
+	output     string
+	arm        int
+	thickness  int
+	labelScale int
 }
 
 func newAnnotateCmd() *cobra.Command {
@@ -34,7 +35,9 @@ RGB image with a red cross at every catalogue position.
 
 The original samples are copied to the red, green and blue channels, so the
 ghost appears neutral. Each cross is drawn in pure red and clipped at the image
-border. Positions are 0-based registered pixels, as written by scan.
+border. Its catalogue number is printed beside it, also in red: to the right of
+the cross when it fits, otherwise to the left. Positions are 0-based registered
+pixels, as written by scan.
 
 The output is a Float32 XISF image with bounds 0:1 and is compressed with zlib.`,
 		Args: cobra.NoArgs,
@@ -55,6 +58,8 @@ The output is a Float32 XISF image with bounds 0:1 and is compressed with zlib.`
 		"RGB XISF image to write")
 	flags.IntVar(&opts.arm, "arm", 12, "cross arm length in pixels")
 	flags.IntVar(&opts.thickness, "thickness", 3, "cross line thickness in pixels")
+	flags.IntVar(&opts.labelScale, "label-scale", 3,
+		"catalogue number scale in pixels; 0 hides numbers")
 	return cmd
 }
 
@@ -73,6 +78,9 @@ func (o *annotateOptions) validate() error {
 	}
 	if o.thickness < 1 {
 		return fmt.Errorf("--thickness must be positive, got %d", o.thickness)
+	}
+	if o.labelScale < 0 {
+		return fmt.Errorf("--label-scale must not be negative, got %d", o.labelScale)
 	}
 
 	src, err := filepath.Abs(o.image)
@@ -99,7 +107,7 @@ func runAnnotate(opts *annotateOptions) error {
 		return err
 	}
 
-	rgb, err := composeDetected(plane, w, h, artefacts, opts.arm, opts.thickness)
+	rgb, err := composeDetected(plane, w, h, artefacts, opts.arm, opts.thickness, opts.labelScale)
 	if err != nil {
 		return err
 	}
@@ -156,9 +164,9 @@ func readMonoImage(path string) ([]float32, int, int, error) {
 	return plane, w, h, nil
 }
 
-// composeDetected copies plane into all three RGB channels and draws a red
-// cross at every artefact position.
-func composeDetected(plane []float32, w, h int, artefacts []report.Artefact, arm, thickness int) ([]float32, error) {
+// composeDetected copies plane into all three RGB channels, draws a red cross
+// at every artefact position and prints its catalogue number beside the cross.
+func composeDetected(plane []float32, w, h int, artefacts []report.Artefact, arm, thickness, labelScale int) ([]float32, error) {
 	if w <= 0 || h <= 0 {
 		return nil, fmt.Errorf("image is %d×%d, want positive dimensions", w, h)
 	}
@@ -167,6 +175,9 @@ func composeDetected(plane []float32, w, h int, artefacts []report.Artefact, arm
 	}
 	if thickness < 1 {
 		return nil, fmt.Errorf("cross thickness must be positive, got %d", thickness)
+	}
+	if labelScale < 0 {
+		return nil, fmt.Errorf("label scale must not be negative, got %d", labelScale)
 	}
 	n := w * h
 	if len(plane) < n {
@@ -179,6 +190,9 @@ func composeDetected(plane []float32, w, h int, artefacts []report.Artefact, arm
 	copy(rgb[2*n:], plane[:n])
 	for _, a := range artefacts {
 		drawCross(rgb, w, h, a.X, a.Y, arm, thickness)
+	}
+	for _, a := range artefacts {
+		drawNumber(rgb, w, h, a.N, a.X, a.Y, arm, labelScale)
 	}
 	return rgb, nil
 }
