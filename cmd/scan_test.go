@@ -156,8 +156,14 @@ func TestWriteStack(t *testing.T) {
 	if im.SampleFormat != xisf.Float32 {
 		t.Errorf("sample format = %v, want Float32", im.SampleFormat)
 	}
-	if im.HasBounds {
-		t.Error("stack kept bounds, want none")
+	if !im.HasBounds {
+		t.Fatal("stack lost bounds, PixInsight rejects float images without them")
+	}
+	if im.Bounds != [2]float64{0, 1} {
+		t.Errorf("bounds = %v, want [0 1]", im.Bounds)
+	}
+	if low, high, ok := im.RepresentableRange(); !ok || low != 0 || high != 1 {
+		t.Errorf("representable range = %v:%v (ok=%v), want 0:1", low, high, ok)
 	}
 	if im.ID != "stack_ghost" {
 		t.Errorf("id = %q, want stack_ghost", im.ID)
@@ -177,6 +183,25 @@ func TestWriteStack(t *testing.T) {
 		if got[i] != plane[i] {
 			t.Fatalf("pixel %d = %v, want %v", i, got[i], plane[i])
 		}
+	}
+
+	// A float template without bounds still yields a valid float master.
+	bareTemplate := filepath.Join(dir, "template-bare.xisf")
+	bareOutput := filepath.Join(dir, "stack-bare.xisf")
+	writeFloatXISFWithoutBounds(t, bareTemplate, w, h, plane)
+	if err := writeStack(bareOutput, bareTemplate, plane, w, h, "stack_ghost"); err != nil {
+		t.Fatalf("writeStack without template bounds: %v", err)
+	}
+	bare, err := xisf.Open(bareOutput)
+	if err != nil {
+		t.Fatalf("open stack without template bounds: %v", err)
+	}
+	if len(bare.Images()) != 1 {
+		t.Fatalf("bare stack has %d images, want 1", len(bare.Images()))
+	}
+	bareImage := bare.Images()[0]
+	if low, high, ok := bareImage.RepresentableRange(); !ok || low != 0 || high != 1 {
+		t.Errorf("bare representable range = %v:%v (ok=%v), want 0:1", low, high, ok)
 	}
 }
 
@@ -330,14 +355,26 @@ func gaussianAt(x, y, cx, cy int, sigma float64) float64 {
 	return math.Exp(-(dx*dx + dy*dy) / (2 * sigma * sigma))
 }
 
-// writeFloatXISF writes a minimal uncompressed Float32 XISF image.
+// writeFloatXISF writes a minimal uncompressed Float32 XISF image with bounds.
 func writeFloatXISF(t *testing.T, path string, w, h int, pixels []float32) {
+	t.Helper()
+	writeFloatXISFWithBounds(t, path, w, h, pixels, ` bounds="0:1"`)
+}
+
+// writeFloatXISFWithoutBounds writes a Float32 XISF image with no bounds
+// attribute, as some integer-era templates do.
+func writeFloatXISFWithoutBounds(t *testing.T, path string, w, h int, pixels []float32) {
+	t.Helper()
+	writeFloatXISFWithBounds(t, path, w, h, pixels, "")
+}
+
+func writeFloatXISFWithBounds(t *testing.T, path string, w, h int, pixels []float32, bounds string) {
 	t.Helper()
 	if len(pixels) != w*h {
 		t.Fatalf("writeFloatXISF: %d pixels for %d×%d", len(pixels), w, h)
 	}
 	size := len(pixels) * 4
-	img := fmt.Sprintf(`<Image id="test" geometry="%d:%d:1" sampleFormat="Float32" bounds="0:1" colorSpace="Gray"`, w, h)
+	img := fmt.Sprintf(`<Image id="test" geometry="%d:%d:1" sampleFormat="Float32"%s colorSpace="Gray"`, w, h, bounds)
 	meta := `<Metadata>` +
 		`<Property id="XISF:CreationTime" type="String">2026-01-01T00:00:00Z</Property>` +
 		`<Property id="XISF:CreatorApplication" type="String">exorciser-test</Property>` +

@@ -58,7 +58,8 @@ Both groups are ranked by the absolute peak_snr in the report and the strongest
 frame with an affine transform (scale and offset), then the group is averaged
 with per-pixel sigma clipping. The two masters are written as stack_ghost.xisf
 and stack_clean.xisf inside the output directory. Their XISF header is inherited
-from the first frame of the group, with Float32 samples and no bounds.
+from the first frame of the group, with Float32 samples and the template's
+declared bounds.
 
 The difference is searched with Gaussian matched filters at several scales.
 Every local maximum whose absolute signal-to-noise ratio reaches --min-snr is
@@ -538,8 +539,16 @@ func writeStack(path, template string, plane []float32, w, h int, id string) err
 		return fmt.Errorf("template has %d channels, want 1", im.Channels())
 	}
 
+	// bounds is mandatory for a floating-point XISF image. The template's
+	// declared range survives the change of sample format; integer templates
+	// contribute their natural range, and a bare float template gets 0:1.
+	low, high, ok := im.RepresentableRange()
+	if !ok {
+		low, high = 0, 1
+	}
 	im.SampleFormat = xisf.Float32
-	im.HasBounds = false
+	im.HasBounds = true
+	im.Bounds = [2]float64{low, high}
 	im.HasOffset = false
 	im.ID = id
 	im.ImageType = "MasterLight"
