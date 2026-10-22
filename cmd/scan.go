@@ -30,6 +30,7 @@ type scanOptions struct {
 	report       string
 	input        string
 	outputDir    string
+	filter       string
 	count        int
 	sigma        float64
 	iterations   int
@@ -58,7 +59,7 @@ Both groups are ranked by the absolute peak_snr in the report and the strongest
 --count frames of each are kept. Every frame is normalised to the first clean
 frame with an affine transform (scale and offset), then the group is averaged
 with per-pixel sigma clipping. The two masters are written as stack_ghost.xisf
-and stack_clean.xisf inside the output directory. Their XISF header is inherited
+and stack_clean.xisf inside <output>/<filter>. Their XISF header is inherited
 from the first frame of the group, with Float32 samples and the template's
 declared bounds.
 
@@ -86,7 +87,11 @@ and a ghost that is equally present in both groups cancels. A ghost that moves
 with each frame's alignment offset is averaged, so its reported centre is the
 mean registered position.
 
-The reports are semicolon-delimited and use a decimal comma.`,
+The filter is read from the input directory, for example _FILTER-L_mono selects
+L. Use --filter to select one filter from a parent directory. The detection
+report defaults to <output>/<filter>/detection.csv, and the catalogue and both
+masters are written to <output>/<filter>. The reports are semicolon-delimited
+and use a decimal comma.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if opts.count < 2 {
@@ -145,12 +150,14 @@ The reports are semicolon-delimited and use a decimal comma.`,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVar(&opts.report, "report", filepath.Join("output", detectionName),
-		"detection report produced by detect")
+	flags.StringVar(&opts.report, "report", "",
+		"detection report produced by detect (default <output>/<filter>/"+detectionName+")")
 	flags.StringVarP(&opts.input, "input", "i", defaultInput,
 		"directory searched for .xisf files when no path is given")
+	flags.StringVar(&opts.filter, "filter", "",
+		"filter to select from the input (L, R, G, B, S, H or O; default: read from the input directory)")
 	flags.StringVarP(&opts.outputDir, "output", "o", "output",
-		"directory receiving "+artefactsName+" and the two masters")
+		"root directory receiving <filter>/"+artefactsName+" and the two masters")
 	flags.IntVarP(&opts.count, "count", "n", 10,
 		"strongest frames taken from each group")
 	flags.Float64Var(&opts.sigma, "sigma", 3,
@@ -178,12 +185,29 @@ The reports are semicolon-delimited and use a decimal comma.`,
 }
 
 func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
-	if err := os.MkdirAll(opts.outputDir, 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
-	}
-	rows, err := readDetectionRows(opts.report)
+	paths, err := collect(roots)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", opts.report, err)
+		return err
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("no .xisf files to scan in %s", strings.Join(roots, ", "))
+	}
+	filter, paths, err := resolveInputFilter(paths, opts.filter)
+	if err != nil {
+		return err
+	}
+	outDir := outputFilterDir(opts.outputDir, filter)
+
+	reportPath := opts.report
+	if reportPath == "" {
+		reportPath = filepath.Join(outDir, detectionName)
+	}
+	rows, err := readDetectionRows(reportPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", reportPath, err)
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
 	}
 
 	ghostRows, cleanRows, err := selectScanRows(rows, opts.count)
@@ -191,10 +215,6 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		return err
 	}
 
-	paths, err := collect(roots)
-	if err != nil {
-		return err
-	}
 	byName, err := framesByName(paths)
 	if err != nil {
 		return err
@@ -209,9 +229,10 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	}
 
 	slog.Info("frames selected",
+		"filter", filter,
 		"detected", len(ghostPaths),
 		"clean", len(cleanPaths),
-		"report", opts.report)
+		"report", reportPath)
 	for _, row := range ghostRows {
 		slog.Debug("selected detected frame", "file", row.File, "peak_snr", row.PeakSNR)
 	}
@@ -247,10 +268,10 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		"frames", len(cleanFrames),
 		"rejected", clean.Rejected,
 		"invalid", clean.Invalid)
-	if err := writeStack(filepath.Join(opts.outputDir, stackCleanName), cleanPaths[0], clean.Plane, w, h, "stack_clean"); err != nil {
+	if err := writeStack(filepath.Join(outDir, stackCleanName), cleanPaths[0], clean.Plane, w, h, "stack_clean"); err != nil {
 		return fmt.Errorf("write %s: %w", stackCleanName, err)
 	}
-	slog.Info("master written", "path", filepath.Join(opts.outputDir, stackCleanName))
+	slog.Info("master written", "path", filepath.Join(outDir, stackCleanName))
 	clear(cleanFrames)
 	runtime.GC()
 
@@ -297,10 +318,10 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		"frames", len(ghostFrames),
 		"rejected", ghost.Rejected,
 		"invalid", ghost.Invalid)
-	if err := writeStack(filepath.Join(opts.outputDir, stackGhostName), ghostPaths[0], ghost.Plane, w, h, "stack_ghost"); err != nil {
+	if err := writeStack(filepath.Join(outDir, stackGhostName), ghostPaths[0], ghost.Plane, w, h, "stack_ghost"); err != nil {
 		return fmt.Errorf("write %s: %w", stackGhostName, err)
 	}
-	slog.Info("master written", "path", filepath.Join(opts.outputDir, stackGhostName))
+	slog.Info("master written", "path", filepath.Join(outDir, stackGhostName))
 	clear(ghostFrames)
 	runtime.GC()
 
@@ -339,10 +360,11 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 			Scale: a.Scale,
 		}
 	}
-	if err := writeArtefacts(opts.outputDir, artefacts); err != nil {
+	if err := writeArtefacts(outDir, artefacts); err != nil {
 		return err
 	}
 	slog.Info("done",
+		"filter", filter,
 		"artefacts", len(artefacts),
 		"width", w,
 		"height", h)

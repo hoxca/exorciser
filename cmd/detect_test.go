@@ -247,7 +247,7 @@ func TestRunDetectOnSampleFiles(t *testing.T) {
 		t.Fatalf("runDetect: %v", err)
 	}
 
-	records := readDetectionReport(t, outputDir)
+	records := readDetectionReport(t, filepath.Join(outputDir, "L"))
 	if len(records) != 2 {
 		t.Fatalf("detection report has %d records, want header plus one row", len(records))
 	}

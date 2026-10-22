@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/hoxca/exorciser/internal/report"
 	"github.com/hoxca/exorciser/internal/xisfwrite"
@@ -19,6 +20,7 @@ type annotateOptions struct {
 	image      string
 	artefacts  string
 	output     string
+	filter     string
 	arm        int
 	thickness  int
 	labelScale int
@@ -39,6 +41,11 @@ border. Its catalogue number is printed beside it, also in red: to the right of
 the cross when it fits, otherwise to the left. Positions are 0-based registered
 pixels, as written by scan.
 
+The filter is selected with --filter. Without it, annotate reads the filter from
+explicit --image, --artefacts or --output paths and falls back to L. The default
+paths are output/<filter>/stack_ghost.xisf, output/<filter>/artefacts.csv and
+output/<filter>/stack_detected.xisf.
+
 The output is a Float32 XISF image with bounds 0:1 and is compressed with zlib.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -50,12 +57,14 @@ The output is a Float32 XISF image with bounds 0:1 and is compressed with zlib.`
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&opts.image, "image", "i", filepath.Join("output", stackGhostName),
-		"monochrome XISF master to annotate")
-	flags.StringVarP(&opts.artefacts, "artefacts", "a", filepath.Join("output", artefactsName),
-		"artefact catalogue produced by scan")
-	flags.StringVarP(&opts.output, "output", "o", filepath.Join("output", stackDetectedName),
-		"RGB XISF image to write")
+	flags.StringVarP(&opts.image, "image", "i", "",
+		"monochrome XISF master to annotate (default output/<filter>/"+stackGhostName+")")
+	flags.StringVarP(&opts.artefacts, "artefacts", "a", "",
+		"artefact catalogue produced by scan (default output/<filter>/"+artefactsName+")")
+	flags.StringVarP(&opts.output, "output", "o", "",
+		"RGB XISF image to write (default output/<filter>/"+stackDetectedName+")")
+	flags.StringVar(&opts.filter, "filter", "",
+		"filter to annotate (L, R, G, B, S, H or O; default: read from paths, otherwise L)")
 	flags.IntVar(&opts.arm, "arm", 12, "cross arm length in pixels")
 	flags.IntVar(&opts.thickness, "thickness", 3, "cross line thickness in pixels")
 	flags.IntVar(&opts.labelScale, "label-scale", 3,
@@ -64,14 +73,10 @@ The output is a Float32 XISF image with bounds 0:1 and is compressed with zlib.`
 }
 
 func (o *annotateOptions) validate() error {
-	if o.image == "" {
-		return errors.New("--image must not be empty")
-	}
-	if o.artefacts == "" {
-		return errors.New("--artefacts must not be empty")
-	}
-	if o.output == "" {
-		return errors.New("--output must not be empty")
+	if o.filter != "" {
+		if _, err := normalizeFilter(o.filter); err != nil {
+			return fmt.Errorf("--filter: %w", err)
+		}
 	}
 	if o.arm < 0 {
 		return fmt.Errorf("--arm must not be negative, got %d", o.arm)
@@ -82,7 +87,15 @@ func (o *annotateOptions) validate() error {
 	if o.labelScale < 0 {
 		return fmt.Errorf("--label-scale must not be negative, got %d", o.labelScale)
 	}
+	return o.checkPaths()
+}
 
+// checkPaths rejects an output that would overwrite the source image. It skips
+// the comparison until resolve has filled in any omitted default paths.
+func (o *annotateOptions) checkPaths() error {
+	if o.image == "" || o.output == "" {
+		return nil
+	}
 	src, err := filepath.Abs(o.image)
 	if err != nil {
 		return fmt.Errorf("resolve --image: %w", err)
@@ -97,7 +110,80 @@ func (o *annotateOptions) validate() error {
 	return nil
 }
 
+// resolveFilter chooses the filter from --filter or from the filter directory
+// in an explicit path, defaulting to L when no path names one.
+func (o *annotateOptions) resolveFilter() (string, error) {
+	selected := ""
+	if o.filter != "" {
+		filter, err := normalizeFilter(o.filter)
+		if err != nil {
+			return "", fmt.Errorf("--filter: %w", err)
+		}
+		selected = filter
+	}
+
+	paths := []struct {
+		name string
+		path string
+	}{
+		{"--image", o.image},
+		{"--artefacts", o.artefacts},
+		{"--output", o.output},
+	}
+	for _, p := range paths {
+		if p.path == "" {
+			continue
+		}
+		filters := filtersInPath(filepath.Dir(p.path), true)
+		if len(filters) > 1 {
+			return "", fmt.Errorf("%s %q contains conflicting filters %s",
+				p.name, p.path, strings.Join(filters, ", "))
+		}
+		if len(filters) == 0 {
+			continue
+		}
+		filter := filters[0]
+		if selected == "" {
+			selected = filter
+			continue
+		}
+		if selected != filter {
+			return "", fmt.Errorf("%s %q is filter %s but selected filter is %s",
+				p.name, p.path, filter, selected)
+		}
+	}
+	if selected == "" {
+		selected = defaultFilter
+	}
+	return selected, nil
+}
+
+// resolve fills the per-filter defaults and returns the selected filter.
+func (o *annotateOptions) resolve() (string, error) {
+	filter, err := o.resolveFilter()
+	if err != nil {
+		return "", err
+	}
+	if o.image == "" {
+		o.image = filepath.Join("output", filter, stackGhostName)
+	}
+	if o.artefacts == "" {
+		o.artefacts = filepath.Join("output", filter, artefactsName)
+	}
+	if o.output == "" {
+		o.output = filepath.Join("output", filter, stackDetectedName)
+	}
+	if err := o.checkPaths(); err != nil {
+		return "", err
+	}
+	return filter, nil
+}
+
 func runAnnotate(opts *annotateOptions) error {
+	filter, err := opts.resolve()
+	if err != nil {
+		return err
+	}
 	artefacts, err := readArtefactsFile(opts.artefacts)
 	if err != nil {
 		return err
@@ -119,6 +205,7 @@ func runAnnotate(opts *annotateOptions) error {
 	}
 
 	slog.Info("detected image written",
+		"filter", filter,
 		"path", opts.output,
 		"artefacts", len(artefacts),
 		"width", w,

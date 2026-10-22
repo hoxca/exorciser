@@ -220,7 +220,7 @@ const (
 
 func TestRunScanEndToEnd(t *testing.T) {
 	dir := t.TempDir()
-	frames := filepath.Join(dir, "frames")
+	frames := filepath.Join(dir, "Light_BIN-1_4096x4096_EXPOSURE-600.00s_FILTER-L_mono")
 	if err := os.Mkdir(frames, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,11 @@ func TestRunScanEndToEnd(t *testing.T) {
 		})
 	}
 
-	reportPath := filepath.Join(dir, "detection.csv")
+	outDir := filepath.Join(dir, "out")
+	reportPath := filepath.Join(outDir, "L", detectionName)
+	if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	rf, err := os.Create(reportPath)
 	if err != nil {
 		t.Fatal(err)
@@ -256,9 +260,7 @@ func TestRunScanEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outDir := filepath.Join(dir, "out")
 	opts := &scanOptions{
-		report:       reportPath,
 		outputDir:    outDir,
 		count:        4,
 		sigma:        3,
@@ -276,7 +278,8 @@ func TestRunScanEndToEnd(t *testing.T) {
 		t.Fatalf("runScan: %v", err)
 	}
 
-	artefacts := readScanArtefacts(t, filepath.Join(outDir, artefactsName))
+	filterOut := filepath.Join(outDir, "L")
+	artefacts := readScanArtefacts(t, filepath.Join(filterOut, artefactsName))
 	if len(artefacts) == 0 {
 		t.Fatal("scan wrote no artefacts")
 	}
@@ -312,11 +315,11 @@ func TestRunScanEndToEnd(t *testing.T) {
 		t.Errorf("no artefact within 8 px of the injected ghost (%d,%d): %v", scanGhostX, scanGhostY, artefacts)
 	}
 
-	ghostPlane, gw, gh, err := loadPlane(filepath.Join(outDir, stackGhostName))
+	ghostPlane, gw, gh, err := loadPlane(filepath.Join(filterOut, stackGhostName))
 	if err != nil {
 		t.Fatalf("load ghost master: %v", err)
 	}
-	cleanPlane, cw, ch, err := loadPlane(filepath.Join(outDir, stackCleanName))
+	cleanPlane, cw, ch, err := loadPlane(filepath.Join(filterOut, stackCleanName))
 	if err != nil {
 		t.Fatalf("load clean master: %v", err)
 	}

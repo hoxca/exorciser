@@ -27,6 +27,7 @@ type detectOptions struct {
 	input     string
 	outputDir string
 	reference string
+	filter    string
 	window    int
 	workers   int
 	margin    int
@@ -78,7 +79,10 @@ Known limitation: a ghost present in both the frame and the reference cancels
 in the residual. The score measures the difference in ghost strength, and
 structure common to every row belongs to the reference.
 
-The report is written to detection.csv inside the --output directory. It is
+The filter is read from the input directory. A directory ending in
+_FILTER-L_mono selects L; L, R, G, B, S, H and O are recognised. Use --filter to
+select one filter from a parent directory. A run processes one filter at a time
+and writes its report to <output>/<filter>/detection.csv. The report is
 semicolon-delimited and uses a decimal comma.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -130,8 +134,10 @@ semicolon-delimited and uses a decimal comma.`,
 		"reference frame compared with every image (required)")
 	flags.StringVarP(&opts.input, "input", "i", defaultInput,
 		"directory searched for .xisf files when no path is given")
+	flags.StringVar(&opts.filter, "filter", "",
+		"filter to select from the input (L, R, G, B, S, H or O; default: read from the input directory)")
 	flags.StringVarP(&opts.outputDir, "output", "o", "output",
-		"directory receiving "+detectionName)
+		"root directory receiving <filter>/"+detectionName)
 	flags.IntVarP(&opts.window, "window", "w", 128,
 		"side length in pixels of the analysed window")
 	flags.StringVar(&coord, "coord", "",
@@ -215,11 +221,6 @@ func windowFor(coord *point, size, w, h int) (detect.Window, error) {
 }
 
 func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
-	ref, err := loadReference(opts.reference)
-	if err != nil {
-		return fmt.Errorf("load reference: %w", err)
-	}
-
 	paths, err := collect(roots)
 	if err != nil {
 		return err
@@ -232,7 +233,19 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 		return fmt.Errorf("no .xisf files to analyse in %s", strings.Join(roots, ", "))
 	}
 
+	filter, paths, err := resolveInputFilter(paths, opts.filter)
+	if err != nil {
+		return err
+	}
+	outDir := outputFilterDir(opts.outputDir, filter)
+
+	ref, err := loadReference(opts.reference)
+	if err != nil {
+		return fmt.Errorf("load reference: %w", err)
+	}
+
 	slog.Info("analysing images",
+		"filter", filter,
 		"files", len(paths),
 		"workers", opts.workers,
 		"window", opts.window,
@@ -253,7 +266,7 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 		slog.Warn("several images share a filename",
 			"file", dup.name, "count", dup.count)
 	}
-	if err := writeDetections(opts.outputDir, rows); err != nil {
+	if err := writeDetections(outDir, rows); err != nil {
 		return err
 	}
 
@@ -269,6 +282,7 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 		}
 	}
 	slog.Info("done",
+		"filter", filter,
 		"images", analysed,
 		"detected", detected,
 		"failed", failed,

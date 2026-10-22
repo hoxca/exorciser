@@ -101,6 +101,104 @@ func TestAnnotateOptionsValidate(t *testing.T) {
 	if err := smallLabel.validate(); err == nil {
 		t.Fatal("accepted a negative label scale")
 	}
+
+	badFilter := *base
+	badFilter.filter = "X"
+	if err := badFilter.validate(); err == nil {
+		t.Fatal("accepted an invalid filter")
+	}
+}
+
+func TestResolveAnnotateDefaults(t *testing.T) {
+	opts := &annotateOptions{}
+	filter, err := opts.resolve()
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if filter != "L" {
+		t.Errorf("filter = %q, want L", filter)
+	}
+	if want := filepath.Join("output", "L", stackGhostName); opts.image != want {
+		t.Errorf("image = %q, want %q", opts.image, want)
+	}
+	if want := filepath.Join("output", "L", artefactsName); opts.artefacts != want {
+		t.Errorf("artefacts = %q, want %q", opts.artefacts, want)
+	}
+	if want := filepath.Join("output", "L", stackDetectedName); opts.output != want {
+		t.Errorf("output = %q, want %q", opts.output, want)
+	}
+}
+
+func TestResolveAnnotateFilter(t *testing.T) {
+	tests := []struct {
+		name       string
+		opts       annotateOptions
+		wantFilter string
+		wantErr    bool
+	}{
+		{
+			name:       "explicit",
+			opts:       annotateOptions{filter: "r"},
+			wantFilter: "R",
+		},
+		{
+			name: "from artefacts",
+			opts: annotateOptions{
+				artefacts: filepath.Join("output", "G", artefactsName),
+			},
+			wantFilter: "G",
+		},
+		{
+			name: "from image",
+			opts: annotateOptions{
+				image: filepath.Join("output", "B", stackGhostName),
+			},
+			wantFilter: "B",
+		},
+		{
+			name: "conflicting paths",
+			opts: annotateOptions{
+				image:     filepath.Join("output", "L", stackGhostName),
+				artefacts: filepath.Join("output", "R", artefactsName),
+			},
+			wantErr: true,
+		},
+		{
+			name: "explicit conflicts with path",
+			opts: annotateOptions{
+				filter:    "R",
+				artefacts: filepath.Join("output", "L", artefactsName),
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := tt.opts
+			filter, err := opts.resolve()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("resolve = %q, want error", filter)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if filter != tt.wantFilter {
+				t.Fatalf("filter = %q, want %q", filter, tt.wantFilter)
+			}
+			wantImage := filepath.Join("output", tt.wantFilter, stackGhostName)
+			wantArtefacts := filepath.Join("output", tt.wantFilter, artefactsName)
+			wantOutput := filepath.Join("output", tt.wantFilter, stackDetectedName)
+			if opts.image != wantImage || opts.artefacts != wantArtefacts || opts.output != wantOutput {
+				t.Errorf("resolved paths = %q, %q, %q; want %q, %q, %q",
+					opts.image, opts.artefacts, opts.output,
+					wantImage, wantArtefacts, wantOutput)
+			}
+		})
+	}
 }
 
 func TestRunAnnotate(t *testing.T) {
