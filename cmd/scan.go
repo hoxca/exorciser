@@ -37,6 +37,7 @@ type scanOptions struct {
 	minFrames    int
 	workers      int
 	minSNR       float64
+	cleanMargin  float64
 	polarity     detect.Polarity
 	scales       []float64
 	margin       int
@@ -55,13 +56,17 @@ func newScanCmd() *cobra.Command {
 subtract the clean master from the detected one, and search the difference for
 every diffuse artefact.
 
-Both groups are ranked by the absolute peak_snr in the report and the strongest
---count frames of each are kept. Every frame is normalised to the first clean
-frame with an affine transform (scale and offset), then the group is averaged
-with per-pixel sigma clipping. The two masters are written as stack_ghost.xisf
-and stack_clean.xisf inside <output>/<filter>. Their XISF header is inherited
-from the first frame of the group, with Float32 samples and the template's
-declared bounds.
+The detected group is ranked by peak_snr and its strongest --count frames are
+kept. Every usable clean frame is eligible, except one whose peak_snr lies
+within --clean-margin of the detection threshold: for a ghost-free frame the
+peak is only a background fluctuation, so its value cannot rank the frame, but
+a peak close to the threshold may hide a faint ghost. Clean frames are taken in
+report order, up to --count. Every frame is normalised to the first selected
+clean frame with an affine transform (scale and offset), then the group is
+averaged with per-pixel sigma clipping. The two masters are written as
+stack_ghost.xisf and stack_clean.xisf inside <output>/<filter>. Their XISF
+header is inherited from the first frame of the group, with Float32 samples and
+the template's declared bounds.
 
 The difference is searched with Gaussian matched filters at several scales.
 Every local maximum whose absolute signal-to-noise ratio reaches --min-snr and
@@ -115,6 +120,10 @@ and use a decimal comma.`,
 			if opts.minSNR <= 0 || math.IsNaN(opts.minSNR) || math.IsInf(opts.minSNR, 0) {
 				return fmt.Errorf("--min-snr must be a positive number, got %v", opts.minSNR)
 			}
+			if opts.cleanMargin < 0 || opts.cleanMargin >= 1 ||
+				math.IsNaN(opts.cleanMargin) || math.IsInf(opts.cleanMargin, 0) {
+				return fmt.Errorf("--clean-margin must be in [0,1), got %v", opts.cleanMargin)
+			}
 			if opts.margin < 0 {
 				return fmt.Errorf("--margin must not be negative, got %d", opts.margin)
 			}
@@ -159,7 +168,7 @@ and use a decimal comma.`,
 	flags.StringVarP(&opts.outputDir, "output", "o", "output",
 		"root directory receiving <filter>/"+artefactsName+" and the two masters")
 	flags.IntVarP(&opts.count, "count", "n", 10,
-		"strongest frames taken from each group")
+		"maximum frames stacked from each group; detected frames are ranked by peak_snr, clean frames are taken in report order")
 	flags.Float64Var(&opts.sigma, "sigma", 3,
 		"sigma-clipping threshold in robust sigmas")
 	flags.IntVar(&opts.iterations, "clip-iterations", 3,
@@ -170,6 +179,8 @@ and use a decimal comma.`,
 		"number of frames decoded and rows processed concurrently")
 	flags.Float64Var(&opts.minSNR, "min-snr", 6,
 		"absolute significance at which a difference peak is reported")
+	flags.Float64Var(&opts.cleanMargin, "clean-margin", 0.2,
+		"fraction of --min-snr within which a clean frame is ambiguous and skipped")
 	flags.StringVar(&polarity, "polarity", "both",
 		"ghost polarity to report: both, positive or negative")
 	flags.StringVar(&scales, "ghost-sigma", "4,8,16",
@@ -210,7 +221,10 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	ghostRows, cleanRows, err := selectScanRows(rows, opts.count)
+	// A clean frame is one whose peak stayed below the detection threshold.
+	// Those within the ambiguity margin of it are skipped rather than stacked.
+	ambiguousAt := opts.minSNR * (1 - opts.cleanMargin)
+	ghostRows, cleanRows, err := selectScanRows(rows, opts.count, ambiguousAt)
 	if err != nil {
 		return err
 	}
@@ -371,9 +385,23 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	return nil
 }
 
-// selectScanRows keeps the strongest usable rows of each class by |peak_snr|.
-func selectScanRows(rows []report.Row, count int) (ghost, clean []report.Row, err error) {
+// selectScanRows picks the frames to stack.
+//
+// The detected group keeps the strongest peaks: there peak_snr measures ghost
+// strength, so it ranks the frames. The clean group is different. A frame is
+// called clean because its peak stayed below the detection threshold, so its
+// peak_snr is only the largest background fluctuation and cannot rank it
+// against the other clean frames. Every usable clean frame is therefore
+// eligible, except one whose peak_snr reaches ambiguousAt: a peak that close
+// to the threshold may hide a faint ghost, and that is a contamination risk
+// rather than a quality ranking. Clean frames are taken in report order.
+//
+// Both groups are capped at count. ambiguousAt is the absolute peak_snr at or
+// above which a clean frame is skipped; pass the detection threshold itself to
+// disable the guard.
+func selectScanRows(rows []report.Row, count int, ambiguousAt float64) (ghost, clean []report.Row, err error) {
 	seen := make(map[string]bool)
+	ambiguous := 0
 	for _, row := range rows {
 		if row.Err != "" {
 			continue
@@ -389,30 +417,44 @@ func selectScanRows(rows []report.Row, count int) (ghost, clean []report.Row, er
 		seen[row.File] = true
 		if row.Detected {
 			ghost = append(ghost, row)
-		} else {
-			clean = append(clean, row)
+			continue
 		}
+		if row.PeakSNR >= ambiguousAt {
+			ambiguous++
+			slog.Debug("clean frame is too close to the detection threshold",
+				"file", row.File, "peak_snr", row.PeakSNR, "threshold", ambiguousAt)
+			continue
+		}
+		clean = append(clean, row)
 	}
 
+	// A detected row is ranked by its peak, strongest first. The clean group is
+	// ordered by name so the selection is deterministic.
 	strength := func(a, b report.Row) int {
-		aa, bb := math.Abs(a.PeakSNR), math.Abs(b.PeakSNR)
 		switch {
-		case aa > bb:
+		case a.PeakSNR > b.PeakSNR:
 			return -1
-		case aa < bb:
+		case a.PeakSNR < b.PeakSNR:
 			return 1
 		default:
 			return strings.Compare(a.File, b.File)
 		}
 	}
 	slices.SortFunc(ghost, strength)
-	slices.SortFunc(clean, strength)
+	slices.SortFunc(clean, func(a, b report.Row) int { return strings.Compare(a.File, b.File) })
+
+	if ambiguous > 0 {
+		slog.Info("ambiguous clean frames skipped",
+			"frames", ambiguous, "peak_snr", ambiguousAt)
+	}
 
 	if len(ghost) < 2 {
 		return nil, nil, fmt.Errorf("detection report has %d usable detected frames, need at least 2", len(ghost))
 	}
 	if len(clean) < 2 {
-		return nil, nil, fmt.Errorf("detection report has %d usable clean frames, need at least 2", len(clean))
+		return nil, nil, fmt.Errorf(
+			"detection report has %d usable clean frames below the ambiguity threshold %.2f, need at least 2; lower --clean-margin or --min-snr",
+			len(clean), ambiguousAt)
 	}
 
 	if len(ghost) > count {
@@ -421,6 +463,7 @@ func selectScanRows(rows []report.Row, count int) (ghost, clean []report.Row, er
 		slog.Warn("fewer detected frames than requested", "have", len(ghost), "want", count)
 	}
 	if len(clean) > count {
+		slog.Info("clean frames capped", "available", len(clean), "using", count)
 		clean = clean[:count]
 	} else if len(clean) < count {
 		slog.Warn("fewer clean frames than requested", "have", len(clean), "want", count)

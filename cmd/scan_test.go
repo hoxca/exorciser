@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hoxca/exorciser/internal/detect"
@@ -29,6 +30,9 @@ func TestScanRejectsBadFlags(t *testing.T) {
 		{name: "min frames above count", args: []string{"--min-frames", "20"}},
 		{name: "workers", args: []string{"--workers", "0"}},
 		{name: "min snr", args: []string{"--min-snr", "0"}},
+		{name: "clean margin negative", args: []string{"--clean-margin=-0.1"}},
+		{name: "clean margin one", args: []string{"--clean-margin=1"}},
+		{name: "clean margin nan", args: []string{"--clean-margin=NaN"}},
 		{name: "polarity", args: []string{"--polarity", "bright"}},
 		{name: "margin", args: []string{"--margin", "-1"}},
 		{name: "star sigma", args: []string{"--star-sigma", "0"}},
@@ -59,28 +63,45 @@ func TestSelectScanRows(t *testing.T) {
 		{File: "g1.xisf", Detected: true, PeakSNR: 12},
 		{File: "error.xisf", Detected: true, PeakSNR: 99, Err: "broken"},
 		{File: "nan.xisf", Detected: true, PeakSNR: math.NaN()},
-		{File: "c1.xisf", Detected: false, PeakSNR: -5},
-		{File: "c2.xisf", Detected: false, PeakSNR: 2},
+		// Deliberately out of order: the clean group is taken by name, and
+		// c4 is close enough to the threshold to be ambiguous.
 		{File: "c3.xisf", Detected: false, PeakSNR: 4},
+		{File: "c1.xisf", Detected: false, PeakSNR: -5},
+		{File: "c4.xisf", Detected: false, PeakSNR: 5.2},
+		{File: "c2.xisf", Detected: false, PeakSNR: 2},
 	}
 
-	ghost, clean, err := selectScanRows(rows, 2)
+	const ambiguousAt = 4.8
+	ghost, clean, err := selectScanRows(rows, 2, ambiguousAt)
 	if err != nil {
 		t.Fatalf("selectScanRows: %v", err)
 	}
 	if got, want := names(ghost), []string{"g1.xisf", "g3.xisf"}; !equalStrings(got, want) {
 		t.Errorf("ghost rows = %v, want %v", got, want)
 	}
-	if got, want := names(clean), []string{"c1.xisf", "c3.xisf"}; !equalStrings(got, want) {
+	// c4 is skipped as ambiguous, and the count caps the clean group at two.
+	if got, want := names(clean), []string{"c1.xisf", "c2.xisf"}; !equalStrings(got, want) {
 		t.Errorf("clean rows = %v, want %v", got, want)
 	}
 
-	ghost, clean, err = selectScanRows(rows, 10)
+	ghost, clean, err = selectScanRows(rows, 10, ambiguousAt)
 	if err != nil {
 		t.Fatalf("selectScanRows: %v", err)
 	}
-	if len(ghost) != 3 || len(clean) != 3 {
-		t.Errorf("got %d ghost and %d clean rows, want 3 and 3", len(ghost), len(clean))
+	if got, want := names(ghost), []string{"g1.xisf", "g3.xisf", "g2.xisf"}; !equalStrings(got, want) {
+		t.Errorf("ghost rows = %v, want %v", got, want)
+	}
+	if got, want := names(clean), []string{"c1.xisf", "c2.xisf", "c3.xisf"}; !equalStrings(got, want) {
+		t.Errorf("clean rows = %v, want %v", got, want)
+	}
+
+	// Passing the detection threshold itself disables the ambiguity guard.
+	_, clean, err = selectScanRows(rows, 10, 6)
+	if err != nil {
+		t.Fatalf("selectScanRows: %v", err)
+	}
+	if got, want := names(clean), []string{"c1.xisf", "c2.xisf", "c3.xisf", "c4.xisf"}; !equalStrings(got, want) {
+		t.Errorf("clean rows with the guard disabled = %v, want %v", got, want)
 	}
 }
 
@@ -90,8 +111,24 @@ func TestSelectScanRowsNeedsBothClasses(t *testing.T) {
 		{File: "g2.xisf", Detected: true, PeakSNR: 7},
 		{File: "c1.xisf", Detected: false, PeakSNR: 2},
 	}
-	if _, _, err := selectScanRows(rows, 2); err == nil {
+	if _, _, err := selectScanRows(rows, 2, 4.8); err == nil {
 		t.Fatal("selectScanRows accepted a single clean frame")
+	}
+}
+
+func TestSelectScanRowsRejectsAmbiguousCleanGroup(t *testing.T) {
+	rows := []report.Row{
+		{File: "g1.xisf", Detected: true, PeakSNR: 12},
+		{File: "g2.xisf", Detected: true, PeakSNR: 7},
+		{File: "c1.xisf", Detected: false, PeakSNR: 5.0},
+		{File: "c2.xisf", Detected: false, PeakSNR: 5.5},
+	}
+	_, _, err := selectScanRows(rows, 2, 4.8)
+	if err == nil {
+		t.Fatal("selectScanRows accepted a clean group of ambiguous frames")
+	}
+	if !strings.Contains(err.Error(), "--clean-margin") {
+		t.Errorf("error = %q, want it to mention --clean-margin", err)
 	}
 }
 
@@ -268,6 +305,7 @@ func TestRunScanEndToEnd(t *testing.T) {
 		minFrames:    2,
 		workers:      2,
 		minSNR:       6,
+		cleanMargin:  0.2,
 		polarity:     detect.PolarityPositive,
 		scales:       []float64{4, 8, 16},
 		margin:       16,
