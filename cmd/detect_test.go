@@ -89,6 +89,82 @@ func TestExcludeReference(t *testing.T) {
 	}
 }
 
+func TestResolveReference(t *testing.T) {
+	paths := []string{
+		"R/VDB149_LIGHT_R_600s_BIN1_006_-09C_20220825_230051_633_W_c_r.xisf",
+		"R/VDB149_LIGHT_R_600s_BIN1_010_-10C_20220825_231551_412_W_c_r.xisf",
+	}
+
+	// Padded and unpadded indexes select the same frame.
+	for _, value := range []string{"006", "6"} {
+		got, err := resolveReference(value, paths, "R")
+		if err != nil {
+			t.Fatalf("resolveReference(%q): %v", value, err)
+		}
+		if got != paths[0] {
+			t.Errorf("resolveReference(%q) = %q, want %q", value, got, paths[0])
+		}
+	}
+
+	if got, err := resolveReference("10", paths, "R"); err != nil || got != paths[1] {
+		t.Errorf("resolveReference(10) = %q, %v, want %q", got, err, paths[1])
+	}
+
+	// Numeric tokens other than the one after BIN are not frame indexes.
+	for _, value := range []string{"600", "20220825", "633"} {
+		if _, err := resolveReference(value, paths, "R"); err == nil {
+			t.Errorf("resolveReference(%q) found a frame, want no match", value)
+		}
+	}
+
+	// Anything that is not a number is treated as a path.
+	for _, value := range []string{"ref.xisf", filepath.Join("dir", "ref.xisf")} {
+		got, err := resolveReference(value, paths, "R")
+		if err != nil {
+			t.Fatalf("resolveReference(%q): %v", value, err)
+		}
+		if got != value {
+			t.Errorf("resolveReference(%q) = %q, want the path unchanged", value, got)
+		}
+	}
+}
+
+func TestResolveReferenceAmbiguous(t *testing.T) {
+	paths := []string{
+		"LIGHT_R_600s_BIN1_006_-09C_20220825_230051_633_W_c_r.xisf",
+		"LIGHT_R_600s_BIN1_006_-10C_20220826_231551_412_W_c_r.xisf",
+	}
+
+	_, err := resolveReference("006", paths, "R")
+	if err == nil {
+		t.Fatal("resolveReference accepted an ambiguous index")
+	}
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("error = %q, want it to mention the ambiguity", err)
+	}
+}
+
+func TestFrameIndex(t *testing.T) {
+	tests := []struct {
+		name string
+		want int
+		ok   bool
+	}{
+		{"VDB149_LIGHT_R_600s_BIN1_006_-09C_20220825_230051_633_W_c_r.xisf", 6, true},
+		{"VDB149_LIGHT_R_600s_BIN1_10_-09C_20220825_230051_633_W_c_r.xisf", 10, true},
+		{"VDB149_LIGHT_R_600s_BIN1_x_-09C_20220825_230051_633_W_c_r.xisf", 0, false},
+		{"VDB149_LIGHT_R_600s_600_-09C_20220825_230051_633_W_c_r.xisf", 0, false},
+		{"BIN1", 0, false},
+	}
+
+	for _, tt := range tests {
+		got, ok := frameIndex(tt.name)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("frameIndex(%q) = %d, %v, want %d, %v", tt.name, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
 func TestDetectRequiresReference(t *testing.T) {
 	cmd := newDetectCmd()
 	cmd.SetArgs([]string{"-o", t.TempDir()})
@@ -213,19 +289,22 @@ func TestRunDetectOnSampleFiles(t *testing.T) {
 	}
 
 	// The known ghost-free frame is the reference; the other frame is measured.
-	reference := paths[0]
+	reference := ""
 	for _, p := range paths {
 		if filepath.Base(p) == referenceName {
 			reference = p
 			break
 		}
 	}
+	if reference == "" {
+		t.Skipf("sample reference %s is absent", referenceName)
+	}
 
 	outputDir := t.TempDir()
 	opts := &detectOptions{
 		input:     input,
 		outputDir: outputDir,
-		reference: reference,
+		reference: referenceIndex,
 		window:    128,
 		workers:   1,
 		margin:    64,
@@ -235,12 +314,15 @@ func TestRunDetectOnSampleFiles(t *testing.T) {
 	}
 	// The reference is among the paths and must be skipped.
 	analysed := ""
+	inBatch := false
 	for _, p := range paths[:2] {
-		if p != reference {
-			analysed = p
+		if p == reference {
+			inBatch = true
+			continue
 		}
+		analysed = p
 	}
-	if analysed == "" {
+	if !inBatch || analysed == "" {
 		t.Skipf("reference %q is not among the first two sample files", filepath.Base(reference))
 	}
 	if err := runDetect(context.Background(), paths[:2], opts); err != nil {
@@ -291,6 +373,9 @@ func TestRunDetectOnSampleFiles(t *testing.T) {
 // referenceName is the known ghost-free frame used by the sample test and by
 // manual runs.
 const referenceName = "VDB149_LIGHT_L_600s_BIN1_002_-09C_20220821_235716_905_W_c_r.xisf"
+
+// referenceIndex is the --reference value that names referenceName.
+const referenceIndex = "002"
 
 // ghostX and ghostY locate the 128×128 window containing a known ghost.
 const (

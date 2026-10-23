@@ -76,9 +76,11 @@ fitted on the --margin ring outside the window, so the feature itself never
 enters the model.
 
 Paths may be directories (searched recursively) or individual .xisf files.
-When no path is given the --input directory is used. The reference frame is not
-analysed: it is skipped if it appears among the paths. Errors on a single image
-are recorded in the report's error column and do not stop the run.
+When no path is given the --input directory is used. --reference is either the
+index of a frame in the selected filter, such as 006 for ..._BIN1_006_..., or a
+path to an .xisf file. The reference frame is not analysed: it is skipped if it
+appears among the paths. Errors on a single image are recorded in the report's
+error column and do not stop the run.
 
 Known limitation: a ghost present in both the frame and the reference cancels
 in the residual. The score measures the difference in ghost strength, and
@@ -136,7 +138,7 @@ semicolon-delimited and uses a decimal comma.`,
 
 	flags := cmd.Flags()
 	flags.StringVar(&opts.reference, "reference", "",
-		"reference frame compared with every image (required)")
+		"reference frame: a frame index (e.g. 006) in the selected filter, or a path to an .xisf file (required)")
 	flags.StringVarP(&opts.input, "input", "i", defaultInput,
 		"directory searched for .xisf files when no path is given")
 	flags.StringVar(&opts.filter, "filter", "",
@@ -230,21 +232,29 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 	if err != nil {
 		return err
 	}
-	paths, skipped := excludeReference(paths, opts.reference)
-	if skipped {
-		slog.Info("reference skipped from the batch", "file", filepath.Base(opts.reference))
-	}
-	if len(paths) == 0 {
-		return fmt.Errorf("no .xisf files to analyse in %s", strings.Join(roots, ", "))
-	}
 
 	filter, paths, err := resolveInputFilter(paths, opts.filter)
 	if err != nil {
 		return err
 	}
+
+	// The reference is resolved after the filter so an index is looked up in the
+	// directory selected by --filter rather than in the whole input tree.
+	refPath, err := resolveReference(opts.reference, paths, filter)
+	if err != nil {
+		return err
+	}
+
+	paths, skipped := excludeReference(paths, refPath)
+	if skipped {
+		slog.Info("reference skipped from the batch", "file", filepath.Base(refPath))
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("no frames left to analyse in %s after skipping the reference", strings.Join(roots, ", "))
+	}
 	outDir := outputFilterDir(opts.outputDir, filter)
 
-	ref, err := loadReference(opts.reference)
+	ref, err := loadReference(refPath)
 	if err != nil {
 		return fmt.Errorf("load reference: %w", err)
 	}
@@ -255,7 +265,7 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 		"workers", opts.workers,
 		"window", opts.window,
 		"scales", opts.scales,
-		"reference", filepath.Base(opts.reference))
+		"reference", filepath.Base(refPath))
 
 	started := time.Now()
 	rows := detectAll(ctx, paths, ref, opts)
@@ -339,6 +349,71 @@ func plane32(im *xisf.Image) ([]float32, error) {
 		plane[i] = float32(v)
 	}
 	return plane, nil
+}
+
+// resolveReference maps --reference to a file. A value of digits is a frame
+// index looked up among the paths of the selected filter; anything else is a
+// path and is returned unchanged.
+func resolveReference(value string, paths []string, filter string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !allDigits(value) {
+		return value, nil
+	}
+	want, err := strconv.Atoi(value)
+	if err != nil {
+		return value, nil
+	}
+
+	var matches []string
+	for _, path := range paths {
+		if index, ok := frameIndex(filepath.Base(path)); ok && index == want {
+			matches = append(matches, path)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no frame with index %s in filter %s; check --reference and --filter", value, filter)
+	case 1:
+		return matches[0], nil
+	default:
+		names := make([]string, len(matches))
+		for i, path := range matches {
+			names[i] = filepath.Base(path)
+		}
+		return "", fmt.Errorf("frame index %s is ambiguous in filter %s: %s",
+			value, filter, strings.Join(names, ", "))
+	}
+}
+
+// frameIndex returns the frame sequence number encoded in a filename: the token
+// immediately after the BIN token, as in ..._BIN1_006_....
+func frameIndex(name string) (int, bool) {
+	tokens := strings.Split(name, "_")
+	for i := 0; i+1 < len(tokens); i++ {
+		bin := tokens[i]
+		if len(bin) <= 3 || !strings.EqualFold(bin[:3], "BIN") || !allDigits(bin[3:]) {
+			continue
+		}
+		index, err := strconv.Atoi(tokens[i+1])
+		if err != nil {
+			return 0, false
+		}
+		return index, true
+	}
+	return 0, false
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // excludeReference drops the reference file from paths, comparing absolute
