@@ -46,7 +46,8 @@ func newDetectCmd() *cobra.Command {
 		Use:   "detect [path...]",
 		Short: "Measure diffuse artefacts against a reference frame",
 		Long: `Compare each image with a reference frame and report how significant the
-strongest diffuse feature in a square window is.
+strongest brighter-than-reference diffuse feature in a square window is.
+Darker features are ignored.
 
 The two frames are linear, so they differ by an affine transform:
 frame ≈ norm_a*reference + norm_b. The transform is fitted on block medians,
@@ -56,14 +57,18 @@ is matched filtered with Gaussian kernels. A diffuse ghost spread over tens of
 pixels is far below the per-pixel noise, but integrating its area turns it into
 a measurable peak_snr. The reported ghost_sigma is the scale with the strongest
 response, peak_x and peak_y its position, and peak_amp its smoothed amplitude
-in pixel units: the kernel-weighted mean residual, positive when the frame is
-brighter than the reference.
+in pixel units: the kernel-weighted mean residual, always positive because a
+darker feature is ignored.
 
-The score is the strongest peak anywhere in the window, not the value at a
-fixed position: registration moves a sensor artefact by each frame's alignment
-offset, so a fixed-position score would miss the ghost. detected is true when
-peak_snr reaches --min-snr, and the report's peak_x and peak_y locate the
-feature so a suspicious row can be inspected.
+Only features brighter than the reference are scored. A dark artefact can
+produce a large response of the opposite sign, but it is ignored, so it never
+sets detected, never hides a fainter bright feature in the same window, and
+never enters the report as a negative peak_snr. The score is the strongest
+positive peak anywhere in the window, not the value at a fixed position:
+registration moves a sensor artefact by each frame's alignment offset, so a
+fixed-position score would miss the ghost. detected is true when peak_snr
+reaches --min-snr, and the report's peak_x and peak_y locate the feature so a
+suspicious row can be inspected.
 
 Pixels beyond four times the background noise are masked before filtering,
 which removes stars and cosmic rays without a star mask. The background plane is

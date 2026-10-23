@@ -51,6 +51,8 @@ var Header = []string{
 // Noise is the residual noise of the background ring, GhostSigma the
 // matched-filter scale with the strongest response, and PeakSNR its
 // significance. Detected is true when PeakSNR reaches the caller's threshold.
+// PeakSNR and PeakAmp are non-negative: only features brighter than the
+// reference are measured.
 //
 // When Err is set every measured value is left empty, since none of them can be
 // trusted. Unknown dimensions are also empty.

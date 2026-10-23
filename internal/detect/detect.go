@@ -1,5 +1,7 @@
-// Package detect measures how significant a diffuse feature in a window of a
-// frame is, using another frame of the same field as a reference.
+// Package detect measures how significant a brighter diffuse feature in a
+// window of a frame is, using another frame of the same field as a reference.
+// Darker features are ignored: a frame is only ever detected when it is
+// brighter than the reference.
 //
 // The two frames are related by an affine transform, because the pixel data is
 // linear: frame ≈ A*ref + B. After removing that transform and a local
@@ -37,7 +39,9 @@ type Options struct {
 	ClipSigma float64
 }
 
-// Result describes the strongest feature found in the window.
+// Result describes the strongest brighter-than-reference feature found in the
+// window. When no positive response exists the peak fields and PeakSNR are
+// zero.
 type Result struct {
 	Affine  Affine
 	Noise   float64
@@ -243,7 +247,9 @@ func fitLine(fs, rs []float64, keep []bool) (Affine, bool) {
 }
 
 // Score fits the affine transform, removes the local background and returns the
-// strongest matched-filter response in the window.
+// strongest positive matched-filter response in the window. A feature darker
+// than the reference has a negative response and is never selected, so PeakSNR
+// and PeakAmp are non-negative.
 func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 	opts = opts.withDefaults()
 
@@ -375,7 +381,9 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 				}
 				searched++
 				snr := signal[idx] / (noise * math.Sqrt(noiseSq[idx]))
-				if math.Abs(snr) <= math.Abs(best) {
+				// Only brighter-than-reference features count. best starts at
+				// zero, so a dark response is rejected here.
+				if snr <= best {
 					continue
 				}
 				best = snr

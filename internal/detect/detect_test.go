@@ -142,6 +142,10 @@ func TestScoreFindsGhost(t *testing.T) {
 			if math.Abs(res.PeakSNR-want) > 0.2*want {
 				t.Errorf("PeakSNR = %.2f, want %.2f (±20%%)", res.PeakSNR, want)
 			}
+			if res.PeakSNR <= 0 || res.PeakAmp <= 0 {
+				t.Errorf("PeakSNR = %.2f, PeakAmp = %v, want both positive",
+					res.PeakSNR, res.PeakAmp)
+			}
 			if res.Scale != tt.ghost {
 				t.Errorf("Scale = %v, want %v", res.Scale, tt.ghost)
 			}
@@ -171,8 +175,8 @@ func TestScoreNull(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed %d: Score: %v", seed, err)
 		}
-		if math.Abs(res.PeakSNR) > 5.5 {
-			t.Errorf("seed %d: PeakSNR = %.2f on a ghost-free pair, want |snr| <= 5.5",
+		if res.PeakSNR < 0 || res.PeakSNR > 5.5 {
+			t.Errorf("seed %d: PeakSNR = %.2f on a ghost-free pair, want 0 <= snr <= 5.5",
 				seed, res.PeakSNR)
 		}
 	}
@@ -190,8 +194,35 @@ func TestScoreIgnoresGhostOutsideWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Score: %v", err)
 	}
-	if math.Abs(res.PeakSNR) > 5 {
-		t.Errorf("PeakSNR = %.2f for a ghost outside the window, want |snr| <= 5", res.PeakSNR)
+	if res.PeakSNR < 0 || res.PeakSNR > 5 {
+		t.Errorf("PeakSNR = %.2f for a ghost outside the window, want 0 <= snr <= 5", res.PeakSNR)
+	}
+}
+
+func TestScoreIgnoresDarkGhost(t *testing.T) {
+	ref, frame := paired(0.004, 17)
+
+	// Same strength as the bright ghost above, but dark. The matched response
+	// is strongly negative, so Score must ignore it and report only noise.
+	addGhost(frame, 300, 260, -0.0028, 8)
+
+	res, err := Score(frame, ref, testW, testH, Options{
+		Window: At(300, 260, 128),
+		Margin: 64,
+		Scales: []float64{4, 8, 16},
+	})
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if res.PeakSNR < 0 || res.PeakAmp < 0 {
+		t.Errorf("PeakSNR = %.2f, PeakAmp = %v, want both non-negative",
+			res.PeakSNR, res.PeakAmp)
+	}
+	// The dark ghost alone would score about -8, well past the detection
+	// threshold in magnitude. Only a positive noise peak may remain.
+	if res.PeakSNR > 5.5 {
+		t.Errorf("PeakSNR = %.2f on a dark ghost, want a noise-level positive response",
+			res.PeakSNR)
 	}
 }
 
@@ -209,8 +240,8 @@ func TestScoreMasksBrightStar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Score: %v", err)
 	}
-	if math.Abs(res.PeakSNR) > 5 {
-		t.Errorf("PeakSNR = %.2f with a masked star, want |snr| <= 5", res.PeakSNR)
+	if res.PeakSNR < 0 || res.PeakSNR > 5 {
+		t.Errorf("PeakSNR = %.2f with a masked star, want 0 <= snr <= 5", res.PeakSNR)
 	}
 }
 
