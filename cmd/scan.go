@@ -43,6 +43,8 @@ type scanOptions struct {
 	margin       int
 	starSigma    float64
 	starDilation int
+	starHalo     int
+	starHaloMin  float64
 }
 
 func newScanCmd() *cobra.Command {
@@ -83,9 +85,11 @@ master.
 
 Stars are common to both groups, but their subtraction residuals dominate the
 difference, so they are masked with a dilated local-mean mask built from the
-clean master. The ghost is absent from that master and survives. The outer
---margin pixels are excluded because registration leaves them poorly
-constrained.
+clean master. The brightest, saturated stars also get a wider halo mask seeded
+by --star-halo-min, removing their perimeter residuals without masking the
+fainter stars that may sit near a real ghost. Both masks are built from the
+clean master, so the ghost is absent and survives. The outer --margin pixels
+are excluded because registration leaves them poorly constrained.
 
 Frames are analysed after star alignment, so positions are in registered pixels
 and a ghost that is equally present in both groups cancels. A ghost that moves
@@ -132,6 +136,12 @@ and use a decimal comma.`,
 			}
 			if opts.starDilation < 0 {
 				return fmt.Errorf("--star-dilation must not be negative, got %d", opts.starDilation)
+			}
+			if opts.starHalo < 0 {
+				return fmt.Errorf("--star-halo must not be negative, got %d", opts.starHalo)
+			}
+			if opts.starHaloMin <= 0 || math.IsNaN(opts.starHaloMin) || math.IsInf(opts.starHaloMin, 0) {
+				return fmt.Errorf("--star-halo-min must be a positive number, got %v", opts.starHaloMin)
 			}
 			if filepath.Ext(opts.outputDir) == ".csv" {
 				return fmt.Errorf("--output is a directory and the file is always %s, got %q",
@@ -191,6 +201,10 @@ and use a decimal comma.`,
 		"star-mask threshold in local-mean noise sigmas")
 	flags.IntVar(&opts.starDilation, "star-dilation", 4,
 		"star-mask dilation in pixels")
+	flags.IntVar(&opts.starHalo, "star-halo", 64,
+		"halo radius in pixels around the brightest stars; 0 disables")
+	flags.Float64Var(&opts.starHaloMin, "star-halo-min", 0.9,
+		"minimum pixel value for the brightest-star halo seed")
 
 	return cmd
 }
@@ -293,10 +307,12 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	// features in the difference. Mask them using the clean master, which does
 	// not contain the ghost being sought.
 	mask, err := detect.StarMask(clean.Plane, w, h, detect.StarMaskOptions{
-		Sigma:    opts.starSigma,
-		Dilation: opts.starDilation,
-		Border:   opts.margin,
-		Workers:  opts.workers,
+		Sigma:        opts.starSigma,
+		Dilation:     opts.starDilation,
+		HaloMin:      opts.starHaloMin,
+		HaloDilation: opts.starHalo,
+		Border:       opts.margin,
+		Workers:      opts.workers,
 	})
 	if err != nil {
 		return fmt.Errorf("build star mask: %w", err)
@@ -309,7 +325,8 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	}
 	slog.Info("star mask ready",
 		"masked", masked,
-		"fraction", float64(masked)/float64(w*h))
+		"fraction", float64(masked)/float64(w*h),
+		"halo", opts.starHalo)
 
 	if err := ctx.Err(); err != nil {
 		return err

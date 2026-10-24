@@ -37,6 +37,9 @@ func TestScanRejectsBadFlags(t *testing.T) {
 		{name: "margin", args: []string{"--margin", "-1"}},
 		{name: "star sigma", args: []string{"--star-sigma", "0"}},
 		{name: "star dilation", args: []string{"--star-dilation", "-1"}},
+		{name: "star halo", args: []string{"--star-halo", "-1"}},
+		{name: "star halo min", args: []string{"--star-halo-min", "0"}},
+		{name: "star halo min nan", args: []string{"--star-halo-min", "NaN"}},
 		{name: "csv output", args: []string{"-o", "out.csv"}},
 		{name: "scales", args: []string{"--ghost-sigma", "four"}},
 	}
