@@ -107,6 +107,18 @@ func TestFitRejectsTinyImages(t *testing.T) {
 	}
 }
 
+func TestBackgroundNoise(t *testing.T) {
+	ref, _ := paired(0.004, 1)
+
+	noise, err := BackgroundNoise(ref, testW, testH, At(300, 260, 128), 16, 64)
+	if err != nil {
+		t.Fatalf("BackgroundNoise: %v", err)
+	}
+	if math.Abs(noise-0.004) > 0.0012 {
+		t.Errorf("noise = %v, want about 0.004", noise)
+	}
+}
+
 func TestScoreFindsGhost(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -53,14 +53,22 @@ var Header = []string{
 // matched-filter scale with the strongest response, Kernel the family of that
 // filter ("gaussian" or "profile"), and PeakSNR its significance. Detected is
 // true when PeakSNR reaches the caller's threshold. PeakSNR and PeakAmp are
-// non-negative: only features brighter than the reference are measured.
+// non-negative: only features brighter than the reference are measured. For a
+// reference row, Noise is the reference frame's own background noise rather
+// than a residual against another frame.
 //
 // When Err is set every measured value is left empty, since none of them can be
 // trusted. Unknown dimensions are also empty.
+//
+// Synthetic marks a row that is not part of the detection batch. The reference
+// row has no matched-filter result, so its detection-only columns are left
+// empty. The dirty row is scored and written like an analysed frame. Synthetic
+// is not a CSV column.
 type Row struct {
-	File   string
-	Width  int
-	Height int
+	File      string
+	Synthetic bool
+	Width     int
+	Height    int
 
 	// Detected is the report's verdict: the strongest peak in the window is
 	// significant enough to be called a ghost.
@@ -128,6 +136,23 @@ func (r Row) Fields() []string {
 		return v
 	}
 
+	normA, normB := stat(r.NormA), stat(r.NormB)
+	ghost := stat(r.GhostSigma)
+	kernel := text(r.Kernel)
+	peakX, peakY := count(r.PeakX), count(r.PeakY)
+	peakSNR := scaled(r.PeakSNR)
+	peakAmp := stat(r.PeakAmp)
+	clipped := count(r.Clipped)
+	if r.Synthetic && !r.Detected {
+		// The reference row has no matched-filter result. Keep its noise,
+		// dimensions and window, but leave the detection columns empty.
+		normA, normB = "", ""
+		ghost, kernel = "", ""
+		peakX, peakY = "", ""
+		peakSNR, peakAmp = "", ""
+		clipped = ""
+	}
+
 	return []string{
 		r.File,
 		flag(r.Detected),
@@ -136,16 +161,16 @@ func (r Row) Fields() []string {
 		count(r.WinX),
 		count(r.WinY),
 		count(r.WinSize),
-		stat(r.NormA),
-		stat(r.NormB),
+		normA,
+		normB,
 		stat(r.Noise),
-		stat(r.GhostSigma),
-		text(r.Kernel),
-		count(r.PeakX),
-		count(r.PeakY),
-		scaled(r.PeakSNR),
-		stat(r.PeakAmp),
-		count(r.Clipped),
+		ghost,
+		kernel,
+		peakX,
+		peakY,
+		peakSNR,
+		peakAmp,
+		clipped,
 		strconv.FormatInt(r.DurationMS, 10),
 		r.Err,
 	}

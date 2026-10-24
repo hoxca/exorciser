@@ -98,6 +98,89 @@ func TestWrite(t *testing.T) {
 	}
 }
 
+func TestWriteReferenceRow(t *testing.T) {
+	r := Row{
+		File:       "ref.xisf",
+		Synthetic:  true,
+		Detected:   false,
+		Width:      4096,
+		Height:     4096,
+		WinX:       2396,
+		WinY:       1916,
+		WinSize:    128,
+		Noise:      0.004321,
+		DurationMS: 3,
+	}
+	fields := r.Fields()
+
+	for name, want := range map[string]string{
+		"detected":    "false",
+		"width":       "4096",
+		"height":      "4096",
+		"win_x":       "2396",
+		"win_y":       "1916",
+		"win_size":    "128",
+		"noise":       "0,004321",
+		"duration_ms": "3",
+	} {
+		if got := fields[column(t, name)]; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	for _, name := range []string{
+		"norm_a", "norm_b", "ghost_sigma", "kernel", "peak_x", "peak_y",
+		"peak_snr", "peak_amp", "clipped_px",
+	} {
+		if got := fields[column(t, name)]; got != "" {
+			t.Errorf("%s = %q on a reference row, want empty", name, got)
+		}
+	}
+}
+
+func TestWriteDirtyRow(t *testing.T) {
+	r := Row{
+		File:       "dirty.xisf",
+		Synthetic:  true,
+		Detected:   true,
+		Width:      4096,
+		Height:     4096,
+		WinX:       2399,
+		WinY:       1925,
+		WinSize:    128,
+		NormA:      0.9987,
+		NormB:      -0.00012,
+		Noise:      0.004321,
+		GhostSigma: 0,
+		Kernel:     "profile",
+		PeakX:      2463,
+		PeakY:      1989,
+		PeakSNR:    18.509,
+		PeakAmp:    0.0004,
+		Clipped:    12,
+		DurationMS: 250,
+	}
+	fields := r.Fields()
+
+	for name, want := range map[string]string{
+		"detected":    "true",
+		"norm_a":      "0,9987",
+		"norm_b":      "-0,00012",
+		"noise":       "0,004321",
+		"ghost_sigma": "0",
+		"kernel":      "profile",
+		"peak_x":      "2463",
+		"peak_y":      "1989",
+		"peak_snr":    "18,509",
+		"peak_amp":    "0,0004",
+		"clipped_px":  "12",
+		"duration_ms": "250",
+	} {
+		if got := fields[column(t, name)]; got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestWriteKeepsZeroValues(t *testing.T) {
 	// A successful measurement that happens to be zero must say 0, not look
 	// like a failed row.

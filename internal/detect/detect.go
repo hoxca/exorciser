@@ -282,26 +282,24 @@ type prepared struct {
 	masked int
 }
 
-// prepare fits the affine transform and background, then builds the clipped,
-// masked residual over a square that extends kernelRadius pixels beyond win.
-// The background ring is the margin-wide border outside that square.
-func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, stride int, clipSigma float64) (prepared, error) {
+// ring is the geometry of the background annulus around a window: the outer
+// square is the window expanded by the margin, and the inner square is the
+// kernel support.
+type ring struct {
+	cx, cy             int
+	x0, y0, ext        int
+	ox0, oy0, ox1, oy1 int
+}
+
+func ringFor(win Window, kernelRadius, margin, w, h int) (ring, error) {
 	if err := win.Validate(w, h); err != nil {
-		return prepared{}, err
+		return ring{}, err
 	}
 	if kernelRadius < 0 {
-		return prepared{}, fmt.Errorf("kernel radius must not be negative, got %d", kernelRadius)
+		return ring{}, fmt.Errorf("kernel radius must not be negative, got %d", kernelRadius)
 	}
 	if margin <= kernelRadius {
-		return prepared{}, fmt.Errorf("margin %d must exceed the kernel radius %d", margin, kernelRadius)
-	}
-	if clipSigma <= 0 || !finite(clipSigma) {
-		return prepared{}, fmt.Errorf("clip sigma must be positive, got %v", clipSigma)
-	}
-
-	aff, err := Fit(frame, ref, w, h, stride)
-	if err != nil {
-		return prepared{}, err
+		return ring{}, fmt.Errorf("margin %d must exceed the kernel radius %d", margin, kernelRadius)
 	}
 
 	cx := win.X + win.Size/2
@@ -310,40 +308,78 @@ func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, s
 	x0, y0 := cx-half, cy-half
 	ext := 2 * half
 	if x0 < 0 || y0 < 0 || x0+ext > w || y0+ext > h {
-		return prepared{}, fmt.Errorf("window plus a %d px kernel radius does not fit a %d×%d image",
+		return ring{}, fmt.Errorf("window plus a %d px kernel radius does not fit a %d×%d image",
 			kernelRadius, w, h)
 	}
 
-	// Background ring: the outer square minus the kernel support square.
 	ox0, oy0 := win.X-margin, win.Y-margin
 	ox1, oy1 := win.X+win.Size+margin, win.Y+win.Size+margin
 	if ox0 < 0 || oy0 < 0 || ox1 > w || oy1 > h {
-		return prepared{}, fmt.Errorf("window plus a %d px margin does not fit a %d×%d image",
+		return ring{}, fmt.Errorf("window plus a %d px margin does not fit a %d×%d image",
 			margin, w, h)
 	}
+	return ring{
+		cx: cx, cy: cy, x0: x0, y0: y0, ext: ext,
+		ox0: ox0, oy0: oy0, ox1: ox1, oy1: oy1,
+	}, nil
+}
 
-	us := make([]float64, 0, (ox1-ox0)*(oy1-oy0))
-	vs := make([]float64, 0, cap(us))
-	zs := make([]float64, 0, cap(us))
-	for y := oy0; y < oy1; y++ {
-		insideY := y >= y0 && y < y0+ext
+// collectRing samples the margin annulus, skipping the kernel support square.
+// Coordinates are relative to the window centre.
+func collectRing(w int, g ring, sample func(i int) (float64, bool)) (us, vs, zs []float64, err error) {
+	us = make([]float64, 0, (g.ox1-g.ox0)*(g.oy1-g.oy0))
+	vs = make([]float64, 0, cap(us))
+	zs = make([]float64, 0, cap(us))
+	for y := g.oy0; y < g.oy1; y++ {
+		insideY := y >= g.y0 && y < g.y0+g.ext
 		line := y * w
-		for x := ox0; x < ox1; x++ {
-			if insideY && x >= x0 && x < x0+ext {
+		for x := g.ox0; x < g.ox1; x++ {
+			if insideY && x >= g.x0 && x < g.x0+g.ext {
 				continue
 			}
-			f := float64(frame[line+x])
-			r := float64(ref[line+x])
-			if !finite(f) || !finite(r) {
+			z, ok := sample(line + x)
+			if !ok {
 				continue
 			}
-			us = append(us, float64(x-cx))
-			vs = append(vs, float64(y-cy))
-			zs = append(zs, f-(aff.A*r+aff.B))
+			us = append(us, float64(x-g.cx))
+			vs = append(vs, float64(y-g.cy))
+			zs = append(zs, z)
 		}
 	}
 	if len(zs) < 100 {
-		return prepared{}, fmt.Errorf("only %d background pixels in the margin, need 100", len(zs))
+		return nil, nil, nil, fmt.Errorf("only %d background pixels in the margin, need 100", len(zs))
+	}
+	return us, vs, zs, nil
+}
+
+// prepare fits the affine transform and background, then builds the clipped,
+// masked residual over a square that extends kernelRadius pixels beyond win.
+// The background ring is the margin-wide border outside that square.
+func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, stride int, clipSigma float64) (prepared, error) {
+	if clipSigma <= 0 || !finite(clipSigma) {
+		return prepared{}, fmt.Errorf("clip sigma must be positive, got %v", clipSigma)
+	}
+
+	g, err := ringFor(win, kernelRadius, margin, w, h)
+	if err != nil {
+		return prepared{}, err
+	}
+
+	aff, err := Fit(frame, ref, w, h, stride)
+	if err != nil {
+		return prepared{}, err
+	}
+
+	us, vs, zs, err := collectRing(w, g, func(i int) (float64, bool) {
+		f := float64(frame[i])
+		r := float64(ref[i])
+		if !finite(f) || !finite(r) {
+			return 0, false
+		}
+		return f - (aff.A*r + aff.B), true
+	})
+	if err != nil {
+		return prepared{}, err
 	}
 
 	bg, noise, err := fitBackground(us, vs, zs)
@@ -355,23 +391,23 @@ func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, s
 	}
 
 	// Residual over the kernel support square, with outliers masked.
-	res := make([]float64, ext*ext)
-	valid := make([]float64, ext*ext)
+	res := make([]float64, g.ext*g.ext)
+	valid := make([]float64, g.ext*g.ext)
 	masked := 0
 	limit := clipSigma * noise
-	for j := 0; j < ext; j++ {
-		y := y0 + j
+	for j := 0; j < g.ext; j++ {
+		y := g.y0 + j
 		line := y * w
-		base := j * ext
-		for i := 0; i < ext; i++ {
-			x := x0 + i
+		base := j * g.ext
+		for i := 0; i < g.ext; i++ {
+			x := g.x0 + i
 			f := float64(frame[line+x])
 			r := float64(ref[line+x])
 			if !finite(f) || !finite(r) {
 				masked++
 				continue
 			}
-			v := f - (aff.A*r + aff.B) - bg.at(x, y, cx, cy)
+			v := f - (aff.A*r + aff.B) - bg.at(x, y, g.cx, g.cy)
 			if math.Abs(v) > limit {
 				masked++
 				continue
@@ -380,7 +416,7 @@ func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, s
 			valid[base+i] = 1
 		}
 	}
-	dilateInvalid(valid, ext, maskDilation)
+	dilateInvalid(valid, g.ext, maskDilation)
 	// The dilated ring must not feed the filter: its weight is excluded from the
 	// noise normalisation, so its samples must be excluded from the signal too.
 	for i := range res {
@@ -389,7 +425,35 @@ func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, s
 		}
 	}
 
-	return prepared{affine: aff, noise: noise, res: res, valid: valid, ext: ext, masked: masked}, nil
+	return prepared{affine: aff, noise: noise, res: res, valid: valid, ext: g.ext, masked: masked}, nil
+}
+
+// BackgroundNoise estimates the robust background noise of frame in the margin
+// ring around win. Unlike Score it does not subtract a reference frame; it is
+// used to report the reference frame's own noise.
+func BackgroundNoise(frame []float32, w, h int, win Window, kernelRadius, margin int) (float64, error) {
+	g, err := ringFor(win, kernelRadius, margin, w, h)
+	if err != nil {
+		return 0, err
+	}
+	us, vs, zs, err := collectRing(w, g, func(i int) (float64, bool) {
+		f := float64(frame[i])
+		if !finite(f) {
+			return 0, false
+		}
+		return f, true
+	})
+	if err != nil {
+		return 0, err
+	}
+	_, noise, err := fitBackground(us, vs, zs)
+	if err != nil {
+		return 0, err
+	}
+	if noise <= 0 {
+		return 0, errors.New("background noise estimate is zero")
+	}
+	return noise, nil
 }
 
 // Score fits the affine transform, removes the local background and returns the

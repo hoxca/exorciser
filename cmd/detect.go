@@ -82,6 +82,12 @@ ghost_sigma is 0 when the profile wins. --profile-radius sets the profile
 support radius (default 16); --margin must exceed it. The dirty frame is
 skipped from the analysis, just like the reference.
 
+Both skipped frames still appear in the report. The reference row carries its
+own background noise and detected=false, with no matched-filter fields. The
+dirty row carries its extraction noise, its fitted norm, and a peak_snr from
+scoring that frame with its own profile; detected is true. That dirty score is
+a self-match and is reported for traceability, not used to decide detection.
+
 Only features brighter than the reference are scored. A dark artefact can
 produce a large response of the opposite sign, but it is ignored, so it never
 sets detected, never hides a fainter bright feature in the same window, and
@@ -291,6 +297,15 @@ func windowFor(coord *point, size, w, h int) (detect.Window, error) {
 	return win, nil
 }
 
+// maxKernelRadius is the largest matched-filter half-width used by the run.
+func maxKernelRadius(opts *detectOptions) int {
+	radius := detect.MaxKernelRadius(opts.scales)
+	if opts.profile != nil && opts.profile.Radius > radius {
+		radius = opts.profile.Radius
+	}
+	return radius
+}
+
 func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 	paths, err := collect(roots)
 	if err != nil {
@@ -345,10 +360,12 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 		return fmt.Errorf("load reference: %w", err)
 	}
 
+	var dirtyRow *report.Row
 	if dirtyPath != "" {
 		if opts.dirtyCoord == nil {
 			return errors.New("--dirty requires --dirty-coord")
 		}
+		dirtyStarted := time.Now()
 		dirty, err := loadPlaneData(dirtyPath)
 		if err != nil {
 			return fmt.Errorf("load dirty frame: %w", err)
@@ -377,6 +394,68 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 			"radius", profile.Radius,
 			"masked", profile.Masked,
 			"noise", profile.Noise)
+
+		dirtyWin, err := windowFor(opts.dirtyCoord, opts.window, dirty.width, dirty.height)
+		if err != nil {
+			return fmt.Errorf("dirty window: %w", err)
+		}
+		res, err := detect.Score(dirty.plane, ref.plane, dirty.width, dirty.height, detect.Options{
+			Window:       dirtyWin,
+			Margin:       opts.margin,
+			Scales:       opts.scales,
+			Profile:      opts.profile,
+			SearchRadius: opts.searchRadius,
+		})
+		if err != nil {
+			return fmt.Errorf("score dirty frame %s: %w", filepath.Base(dirtyPath), err)
+		}
+		dirtyRow = &report.Row{
+			File:       filepath.ToSlash(filepath.Base(dirtyPath)),
+			Synthetic:  true,
+			Detected:   true,
+			Width:      dirty.width,
+			Height:     dirty.height,
+			WinX:       dirtyWin.X,
+			WinY:       dirtyWin.Y,
+			WinSize:    dirtyWin.Size,
+			NormA:      res.Affine.A,
+			NormB:      res.Affine.B,
+			Noise:      profile.Noise,
+			GhostSigma: res.Scale,
+			Kernel:     res.Kernel,
+			PeakX:      res.PeakX,
+			PeakY:      res.PeakY,
+			PeakSNR:    res.PeakSNR,
+			PeakAmp:    res.PeakAmp,
+			Clipped:    res.Masked,
+			DurationMS: time.Since(dirtyStarted).Milliseconds(),
+		}
+	}
+
+	refWin, err := windowFor(opts.coord, opts.window, ref.width, ref.height)
+	if err != nil {
+		return fmt.Errorf("reference window: %w", err)
+	}
+	refStarted := time.Now()
+	refNoise, err := detect.BackgroundNoise(ref.plane, ref.width, ref.height, refWin,
+		maxKernelRadius(opts), opts.margin)
+	if err != nil {
+		return fmt.Errorf("measure reference noise: %w", err)
+	}
+	synthetic := []report.Row{{
+		File:       filepath.ToSlash(filepath.Base(refPath)),
+		Synthetic:  true,
+		Detected:   false,
+		Width:      ref.width,
+		Height:     ref.height,
+		WinX:       refWin.X,
+		WinY:       refWin.Y,
+		WinSize:    refWin.Size,
+		Noise:      refNoise,
+		DurationMS: time.Since(refStarted).Milliseconds(),
+	}}
+	if dirtyRow != nil {
+		synthetic = append(synthetic, *dirtyRow)
 	}
 
 	slog.Info("analysing images",
@@ -390,6 +469,7 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 
 	started := time.Now()
 	rows := detectAll(ctx, paths, ref, opts)
+	rows = append(rows, synthetic...)
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -408,6 +488,9 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 
 	var analysed, failed, detected int
 	for _, r := range rows {
+		if r.Synthetic {
+			continue
+		}
 		if r.Err != "" {
 			failed++
 			continue

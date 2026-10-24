@@ -401,16 +401,22 @@ func TestRunDetectOnSampleFiles(t *testing.T) {
 	}
 
 	records := readDetectionReport(t, filepath.Join(outputDir, "L"))
-	if len(records) != 2 {
-		t.Fatalf("detection report has %d records, want header plus one row", len(records))
+	if len(records) != 3 {
+		t.Fatalf("detection report has %d records, want header, analysed row and reference row", len(records))
+	}
+	findRow := func(name string) []string {
+		for _, rec := range records[1:] {
+			if rec[detectionColumnIndex(t, "file")] == filepath.ToSlash(name) {
+				return rec
+			}
+		}
+		t.Fatalf("no row for %q", name)
+		return nil
 	}
 
-	row := records[1]
+	row := findRow(filepath.Base(analysed))
 	if got := row[detectionColumnIndex(t, "error")]; got != "" {
 		t.Fatalf("error = %q", got)
-	}
-	if file := row[detectionColumnIndex(t, "file")]; file != filepath.Base(analysed) {
-		t.Errorf("file = %q, want %q", file, filepath.Base(analysed))
 	}
 	for name, want := range map[string]string{
 		"detected": "true",
@@ -441,6 +447,36 @@ func TestRunDetectOnSampleFiles(t *testing.T) {
 	peakY := parseDetection(t, row, "peak_y")
 	if peakX < 2396 || peakX >= 2396+128 || peakY < 1916 || peakY >= 1916+128 {
 		t.Errorf("peak at (%v,%v), want inside the 128 px window at (2396,1916)", peakX, peakY)
+	}
+
+	refRow := findRow(filepath.Base(reference))
+	if got := refRow[detectionColumnIndex(t, "detected")]; got != "false" {
+		t.Errorf("reference detected = %q, want false", got)
+	}
+	if got := refRow[detectionColumnIndex(t, "error")]; got != "" {
+		t.Errorf("reference error = %q", got)
+	}
+	for name, want := range map[string]string{
+		"width":    "4096",
+		"height":   "4096",
+		"win_x":    "2396",
+		"win_y":    "1916",
+		"win_size": "128",
+	} {
+		if got := refRow[detectionColumnIndex(t, name)]; got != want {
+			t.Errorf("reference %s = %q, want %q", name, got, want)
+		}
+	}
+	if noise := parseDetection(t, refRow, "noise"); noise <= 0 {
+		t.Errorf("reference noise = %v, want positive", noise)
+	}
+	for _, name := range []string{
+		"norm_a", "norm_b", "ghost_sigma", "kernel", "peak_x", "peak_y",
+		"peak_snr", "peak_amp", "clipped_px",
+	} {
+		if got := refRow[detectionColumnIndex(t, name)]; got != "" {
+			t.Errorf("reference %s = %q, want empty", name, got)
+		}
 	}
 }
 
