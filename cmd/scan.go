@@ -27,24 +27,26 @@ const (
 )
 
 type scanOptions struct {
-	report       string
-	input        string
-	outputDir    string
-	filter       string
-	count        int
-	sigma        float64
-	iterations   int
-	minFrames    int
-	workers      int
-	minSNR       float64
-	cleanMargin  float64
-	polarity     detect.Polarity
-	scales       []float64
-	margin       int
-	starSigma    float64
-	starDilation int
-	starHalo     int
-	starHaloMin  float64
+	report          string
+	input           string
+	outputDir       string
+	filter          string
+	count           int
+	sigma           float64
+	iterations      int
+	minFrames       int
+	workers         int
+	minSNR          float64
+	cleanMargin     float64
+	polarity        detect.Polarity
+	scales          []float64
+	margin          int
+	starSigma       float64
+	starDilation    int
+	starHalo        int
+	starHaloSmall   int
+	starHaloMinArea int
+	starHaloMin     float64
 }
 
 func newScanCmd() *cobra.Command {
@@ -84,12 +86,16 @@ Run annotate afterwards to draw the catalogue on an RGB copy of the ghost
 master.
 
 Stars are common to both groups, but their subtraction residuals dominate the
-difference, so they are masked with a dilated local-mean mask built from the
-clean master. The brightest, saturated stars also get a wider halo mask seeded
-by --star-halo-min, removing their perimeter residuals without masking the
-fainter stars that may sit near a real ghost. Both masks are built from the
-clean master, so the ghost is absent and survives. The outer --margin pixels
-are excluded because registration leaves them poorly constrained.
+difference, so their cores are masked with a dilated local-mean mask built from
+the clean master. Wider halo residuals are handled after detection: saturated
+components are labelled in the clean master, and a candidate is rejected when
+it lies within --star-halo-small of any saturated star or within --star-halo of
+a star whose saturated area reaches --star-halo-min-area. The two radii matter
+because a big star's halo can be much wider than a small star's. Set
+--star-halo=0 to disable this rejection. The mask and the star components are
+built from the clean master, so the ghost is absent and survives. The outer
+--margin pixels are excluded because registration leaves them poorly
+constrained.
 
 Frames are analysed after star alignment, so positions are in registered pixels
 and a ghost that is equally present in both groups cancels. A ghost that moves
@@ -139,6 +145,12 @@ and use a decimal comma.`,
 			}
 			if opts.starHalo < 0 {
 				return fmt.Errorf("--star-halo must not be negative, got %d", opts.starHalo)
+			}
+			if opts.starHaloSmall < 0 {
+				return fmt.Errorf("--star-halo-small must not be negative, got %d", opts.starHaloSmall)
+			}
+			if opts.starHaloMinArea < 0 {
+				return fmt.Errorf("--star-halo-min-area must not be negative, got %d", opts.starHaloMinArea)
 			}
 			if opts.starHaloMin <= 0 || math.IsNaN(opts.starHaloMin) || math.IsInf(opts.starHaloMin, 0) {
 				return fmt.Errorf("--star-halo-min must be a positive number, got %v", opts.starHaloMin)
@@ -201,10 +213,14 @@ and use a decimal comma.`,
 		"star-mask threshold in local-mean noise sigmas")
 	flags.IntVar(&opts.starDilation, "star-dilation", 4,
 		"star-mask dilation in pixels")
-	flags.IntVar(&opts.starHalo, "star-halo", 64,
-		"halo radius in pixels around the brightest stars; 0 disables")
+	flags.IntVar(&opts.starHalo, "star-halo", 220,
+		"big-star halo rejection radius in pixels; 0 disables halo rejection")
+	flags.IntVar(&opts.starHaloSmall, "star-halo-small", 56,
+		"small-star halo rejection radius in pixels")
+	flags.IntVar(&opts.starHaloMinArea, "star-halo-min-area", 40,
+		"minimum saturated pixels for the big-star halo")
 	flags.Float64Var(&opts.starHaloMin, "star-halo-min", 0.9,
-		"minimum pixel value for the brightest-star halo seed")
+		"minimum pixel value for a saturated star")
 
 	return cmd
 }
@@ -304,15 +320,15 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	runtime.GC()
 
 	// Stars are common to both masters, so their residuals are the largest
-	// features in the difference. Mask them using the clean master, which does
-	// not contain the ghost being sought.
+	// features in the difference. Mask their cores using the clean master,
+	// which does not contain the ghost being sought. The wider haloes are
+	// rejected from the candidate list below, where their radius can depend on
+	// the size of each star.
 	mask, err := detect.StarMask(clean.Plane, w, h, detect.StarMaskOptions{
-		Sigma:        opts.starSigma,
-		Dilation:     opts.starDilation,
-		HaloMin:      opts.starHaloMin,
-		HaloDilation: opts.starHalo,
-		Border:       opts.margin,
-		Workers:      opts.workers,
+		Sigma:    opts.starSigma,
+		Dilation: opts.starDilation,
+		Border:   opts.margin,
+		Workers:  opts.workers,
 	})
 	if err != nil {
 		return fmt.Errorf("build star mask: %w", err)
@@ -325,8 +341,22 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	}
 	slog.Info("star mask ready",
 		"masked", masked,
-		"fraction", float64(masked)/float64(w*h),
-		"halo", opts.starHalo)
+		"fraction", float64(masked)/float64(w*h))
+
+	stars, err := detect.StarComponents(clean.Plane, w, h, opts.starHaloMin)
+	if err != nil {
+		return fmt.Errorf("find star components: %w", err)
+	}
+	bigStars := 0
+	for _, s := range stars {
+		if s.Area >= opts.starHaloMinArea {
+			bigStars++
+		}
+	}
+	slog.Info("star components ready",
+		"stars", len(stars),
+		"big", bigStars,
+		"min_area", opts.starHaloMinArea)
 
 	if err := ctx.Err(); err != nil {
 		return err
@@ -378,6 +408,16 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	})
 	if err != nil {
 		return fmt.Errorf("scan difference: %w", err)
+	}
+	if opts.starHalo > 0 {
+		var rejected int
+		found, rejected = detect.RejectStarHaloes(
+			found, stars,
+			float64(opts.starHaloSmall), float64(opts.starHalo),
+			opts.starHaloMinArea)
+		slog.Info("star halo candidates rejected",
+			"rejected", rejected,
+			"remaining", len(found))
 	}
 
 	artefacts := make([]report.Artefact, len(found))

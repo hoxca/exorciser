@@ -282,47 +282,6 @@ func TestStarMask(t *testing.T) {
 	}
 }
 
-func TestStarMaskHalo(t *testing.T) {
-	const w, h = 512, 512
-	plane := syntheticPlane(w, h, []injected{
-		{x: 150, y: 150, sigma: 1.5, amp: 0.5},  // bright star
-		{x: 350, y: 350, sigma: 1.5, amp: 0.02}, // faint star
-	}, 0.01, 8)
-
-	opts := detect.StarMaskOptions{
-		Sigma: 5, Dilation: 8, Border: 16, Workers: 4,
-		HaloMin: 0.8, HaloDilation: 20,
-	}
-	mask, err := detect.StarMask(plane, w, h, opts)
-	if err != nil {
-		t.Fatalf("StarMask: %v", err)
-	}
-	if !mask[150*w+150] {
-		t.Error("bright star centre was not masked")
-	}
-	if !mask[150*w+169] {
-		t.Error("bright star halo was not masked")
-	}
-	if mask[350*w+369] {
-		t.Error("faint star was given a halo")
-	}
-	if mask[350*w+350] {
-		t.Error("faint star centre was masked")
-	}
-	if mask[100*w+300] {
-		t.Error("blank sky was masked")
-	}
-
-	opts.HaloDilation = 0
-	mask, err = detect.StarMask(plane, w, h, opts)
-	if err != nil {
-		t.Fatalf("StarMask without halo: %v", err)
-	}
-	if mask[150*w+169] {
-		t.Error("star halo was masked when halo dilation was disabled")
-	}
-}
-
 func TestScanIgnoresNoise(t *testing.T) {
 	const w, h = 512, 512
 	plane := syntheticPlane(w, h, nil, 0.01, 4)

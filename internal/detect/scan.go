@@ -223,13 +223,6 @@ type StarMaskOptions struct {
 	BoxRadius int
 	// Dilation grows the mask by this many pixels.
 	Dilation int
-	// HaloMin is the absolute pixel value at which a star seeds a wider mask.
-	// It should be high enough to select the saturated stars only. It is
-	// ignored when HaloDilation is zero.
-	HaloMin float64
-	// HaloDilation grows the bright-star seeds by this many pixels, masking
-	// the halo or perimeter of a large star. Zero disables the halo mask.
-	HaloDilation int
 	// Border masks a frame of this width around the image.
 	Border int
 	// Workers is the number of rows processed concurrently.
@@ -262,15 +255,6 @@ func (o StarMaskOptions) validate() error {
 	if o.Dilation < 0 {
 		return fmt.Errorf("star mask dilation must not be negative, got %d", o.Dilation)
 	}
-	if o.HaloDilation < 0 {
-		return fmt.Errorf("star halo dilation must not be negative, got %d", o.HaloDilation)
-	}
-	if o.HaloDilation > 0 && (o.HaloMin <= 0 || !finite(o.HaloMin)) {
-		return fmt.Errorf("star halo brightness must be a positive number, got %v", o.HaloMin)
-	}
-	if o.HaloMin < 0 || !finite(o.HaloMin) {
-		return fmt.Errorf("star halo brightness must not be negative, got %v", o.HaloMin)
-	}
 	if o.Border < 0 {
 		return fmt.Errorf("border must not be negative, got %d", o.Border)
 	}
@@ -286,11 +270,8 @@ func (o StarMaskOptions) validate() error {
 // above the mean of its neighbourhood. A nebula or a ghost fills the box, so
 // its residual stays near the noise. The threshold is measured from the
 // residual with a MAD, which stars do not bias. The mask is dilated so the
-// filter never sees a star's core. When HaloDilation is positive, pixels above
-// the absolute HaloMin brightness seed a wider mask around the saturated stars,
-// covering their halos and perimeters without masking the fainter stars near
-// a real ghost. It is built from the clean master, so a ghost present only in
-// the detected group is not masked.
+// filter never sees a star's core. It is built from the clean master, so a
+// ghost present only in the detected group is not masked.
 func StarMask(plane []float32, w, h int, opts StarMaskOptions) ([]bool, error) {
 	opts = opts.withDefaults()
 	if err := opts.validate(); err != nil {
@@ -333,20 +314,6 @@ func StarMask(plane []float32, w, h int, opts StarMaskOptions) ([]bool, error) {
 		for i, v := range detail {
 			if valid[i] != 0 && math.Abs(v) > limit {
 				mask[i] = true
-			}
-		}
-		if opts.HaloDilation > 0 {
-			halo := make([]bool, w*h)
-			for i, v := range res {
-				if valid[i] != 0 && v > opts.HaloMin {
-					halo[i] = true
-				}
-			}
-			dilateMask(halo, w, h, opts.HaloDilation)
-			for i := range mask {
-				if halo[i] {
-					mask[i] = true
-				}
 			}
 		}
 	}

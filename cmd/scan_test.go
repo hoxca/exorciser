@@ -38,6 +38,8 @@ func TestScanRejectsBadFlags(t *testing.T) {
 		{name: "star sigma", args: []string{"--star-sigma", "0"}},
 		{name: "star dilation", args: []string{"--star-dilation", "-1"}},
 		{name: "star halo", args: []string{"--star-halo", "-1"}},
+		{name: "star halo small", args: []string{"--star-halo-small", "-1"}},
+		{name: "star halo min area", args: []string{"--star-halo-min-area", "-1"}},
 		{name: "star halo min", args: []string{"--star-halo-min", "0"}},
 		{name: "star halo min nan", args: []string{"--star-halo-min", "NaN"}},
 		{name: "csv output", args: []string{"-o", "out.csv"}},
@@ -314,6 +316,8 @@ func TestRunScanEndToEnd(t *testing.T) {
 		margin:       16,
 		starSigma:    50,
 		starDilation: 4,
+		starHalo:     0,
+		starHaloMin:  0.9,
 	}
 	if err := runScan(context.Background(), []string{frames}, opts); err != nil {
 		t.Fatalf("runScan: %v", err)
