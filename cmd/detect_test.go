@@ -89,7 +89,7 @@ func TestExcludeReference(t *testing.T) {
 	}
 }
 
-func TestResolveReference(t *testing.T) {
+func TestResolveFrame(t *testing.T) {
 	paths := []string{
 		"R/VDB149_LIGHT_R_600s_BIN1_006_-09C_20220825_230051_633_W_c_r.xisf",
 		"R/VDB149_LIGHT_R_600s_BIN1_010_-10C_20220825_231551_412_W_c_r.xisf",
@@ -97,47 +97,47 @@ func TestResolveReference(t *testing.T) {
 
 	// Padded and unpadded indexes select the same frame.
 	for _, value := range []string{"006", "6"} {
-		got, err := resolveReference(value, paths, "R")
+		got, err := resolveFrame(value, paths, "R", "--reference")
 		if err != nil {
-			t.Fatalf("resolveReference(%q): %v", value, err)
+			t.Fatalf("resolveFrame(%q): %v", value, err)
 		}
 		if got != paths[0] {
-			t.Errorf("resolveReference(%q) = %q, want %q", value, got, paths[0])
+			t.Errorf("resolveFrame(%q) = %q, want %q", value, got, paths[0])
 		}
 	}
 
-	if got, err := resolveReference("10", paths, "R"); err != nil || got != paths[1] {
-		t.Errorf("resolveReference(10) = %q, %v, want %q", got, err, paths[1])
+	if got, err := resolveFrame("10", paths, "R", "--reference"); err != nil || got != paths[1] {
+		t.Errorf("resolveFrame(10) = %q, %v, want %q", got, err, paths[1])
 	}
 
 	// Numeric tokens other than the one after BIN are not frame indexes.
 	for _, value := range []string{"600", "20220825", "633"} {
-		if _, err := resolveReference(value, paths, "R"); err == nil {
-			t.Errorf("resolveReference(%q) found a frame, want no match", value)
+		if _, err := resolveFrame(value, paths, "R", "--reference"); err == nil {
+			t.Errorf("resolveFrame(%q) found a frame, want no match", value)
 		}
 	}
 
 	// Anything that is not a number is treated as a path.
 	for _, value := range []string{"ref.xisf", filepath.Join("dir", "ref.xisf")} {
-		got, err := resolveReference(value, paths, "R")
+		got, err := resolveFrame(value, paths, "R", "--reference")
 		if err != nil {
-			t.Fatalf("resolveReference(%q): %v", value, err)
+			t.Fatalf("resolveFrame(%q): %v", value, err)
 		}
 		if got != value {
-			t.Errorf("resolveReference(%q) = %q, want the path unchanged", value, got)
+			t.Errorf("resolveFrame(%q) = %q, want the path unchanged", value, got)
 		}
 	}
 }
 
-func TestResolveReferenceAmbiguous(t *testing.T) {
+func TestResolveFrameAmbiguous(t *testing.T) {
 	paths := []string{
 		"LIGHT_R_600s_BIN1_006_-09C_20220825_230051_633_W_c_r.xisf",
 		"LIGHT_R_600s_BIN1_006_-10C_20220826_231551_412_W_c_r.xisf",
 	}
 
-	_, err := resolveReference("006", paths, "R")
+	_, err := resolveFrame("006", paths, "R", "--reference")
 	if err == nil {
-		t.Fatal("resolveReference accepted an ambiguous index")
+		t.Fatal("resolveFrame accepted an ambiguous index")
 	}
 	if !strings.Contains(err.Error(), "ambiguous") {
 		t.Errorf("error = %q, want it to mention the ambiguity", err)
@@ -198,6 +198,77 @@ func TestDetectRejectsBadMinSNR(t *testing.T) {
 				t.Fatalf("detect accepted --min-snr %s, want an error", value)
 			}
 		})
+	}
+}
+
+func TestDetectRequiresDirtyCoord(t *testing.T) {
+	cmd := newDetectCmd()
+	cmd.SetArgs([]string{"--reference", "ref.xisf", "--dirty", "003"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("detect ran with --dirty but no --dirty-coord or --coord, want an error")
+	}
+}
+
+func TestDetectRejectsDirtyCoordWithoutDirty(t *testing.T) {
+	cmd := newDetectCmd()
+	cmd.SetArgs([]string{"--reference", "ref.xisf", "--dirty-coord", "1,2"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("detect accepted --dirty-coord without --dirty, want an error")
+	}
+}
+
+func TestDetectRejectsBadProfileRadius(t *testing.T) {
+	cmd := newDetectCmd()
+	cmd.SetArgs([]string{"--reference", "ref.xisf", "--dirty", "003", "--dirty-coord", "1,2", "--profile-radius", "0"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("detect accepted --profile-radius 0, want an error")
+	}
+}
+
+func TestDetectRejectsSmallProfileMargin(t *testing.T) {
+	cmd := newDetectCmd()
+	cmd.SetArgs([]string{
+		"--reference", "ref.xisf",
+		"--dirty", "003",
+		"--dirty-coord", "1,2",
+		"--profile-radius", "64",
+		"--margin", "60",
+	})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("detect accepted a margin smaller than the profile radius, want an error")
+	}
+}
+
+func TestDetectRejectsNegativeSearchRadius(t *testing.T) {
+	cmd := newDetectCmd()
+	cmd.SetArgs([]string{"--reference", "ref.xisf", "--search-radius", "-1"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("detect accepted a negative --search-radius, want an error")
+	}
+}
+
+func TestParseCoordFlag(t *testing.T) {
+	if _, err := parseCoordFlag("1,2", "--dirty-coord"); err != nil {
+		t.Fatalf("parseCoordFlag: %v", err)
+	}
+	_, err := parseCoordFlag("one,two", "--dirty-coord")
+	if err == nil || !strings.Contains(err.Error(), "--dirty-coord") {
+		t.Fatalf("error = %v, want it to name --dirty-coord", err)
+	}
+}
+
+func TestSamePath(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.xisf")
+	b := filepath.Join(dir, "b.xisf")
+	if !samePath(a, a) {
+		t.Error("samePath(a, a) = false, want true")
+	}
+	if samePath(a, b) {
+		t.Error("samePath(a, b) = true, want false")
+	}
+	if samePath("", a) {
+		t.Error("samePath(\"\", a) = true, want false")
 	}
 }
 
@@ -362,6 +433,9 @@ func TestRunDetectOnSampleFiles(t *testing.T) {
 	}
 	if scale := parseDetection(t, row, "ghost_sigma"); scale != 4 && scale != 8 && scale != 16 {
 		t.Errorf("ghost_sigma = %v, want one of the requested scales", scale)
+	}
+	if kernel := row[detectionColumnIndex(t, "kernel")]; kernel != "gaussian" {
+		t.Errorf("kernel = %q, want gaussian", kernel)
 	}
 	peakX := parseDetection(t, row, "peak_x")
 	peakY := parseDetection(t, row, "peak_y")

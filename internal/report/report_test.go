@@ -27,6 +27,7 @@ func TestWrite(t *testing.T) {
 			NormB:      -0.0001234567,
 			Noise:      0.004321,
 			GhostSigma: 8,
+			Kernel:     "gaussian",
 			PeakX:      2454,
 			PeakY:      1990,
 			PeakSNR:    7.0214,
@@ -70,6 +71,7 @@ func TestWrite(t *testing.T) {
 		"norm_b":      "-0,0001234567",
 		"noise":       "0,004321",
 		"ghost_sigma": "8",
+		"kernel":      "gaussian",
 		"peak_x":      "2454",
 		"peak_y":      "1990",
 		"peak_snr":    "7,021",
@@ -89,7 +91,7 @@ func TestWrite(t *testing.T) {
 	if got := failed[column(t, "error")]; got == "" {
 		t.Error("error is empty on a failed row")
 	}
-	for _, name := range []string{"detected", "norm_a", "noise", "ghost_sigma", "peak_x", "peak_snr", "peak_amp", "clipped_px"} {
+	for _, name := range []string{"detected", "norm_a", "noise", "ghost_sigma", "kernel", "peak_x", "peak_snr", "peak_amp", "clipped_px"} {
 		if got := failed[column(t, name)]; got != "" {
 			t.Errorf("%s = %q on a failed row, want empty", name, got)
 		}

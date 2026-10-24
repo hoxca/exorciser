@@ -37,6 +37,7 @@ var Header = []string{
 	"norm_b",
 	"noise",
 	"ghost_sigma",
+	"kernel",
 	"peak_x",
 	"peak_y",
 	"peak_snr",
@@ -49,10 +50,10 @@ var Header = []string{
 // Row is one image's line in the detection table. The image is compared to a
 // reference frame through the affine transform frame ≈ NormA*reference + NormB;
 // Noise is the residual noise of the background ring, GhostSigma the
-// matched-filter scale with the strongest response, and PeakSNR its
-// significance. Detected is true when PeakSNR reaches the caller's threshold.
-// PeakSNR and PeakAmp are non-negative: only features brighter than the
-// reference are measured.
+// matched-filter scale with the strongest response, Kernel the family of that
+// filter ("gaussian" or "profile"), and PeakSNR its significance. Detected is
+// true when PeakSNR reaches the caller's threshold. PeakSNR and PeakAmp are
+// non-negative: only features brighter than the reference are measured.
 //
 // When Err is set every measured value is left empty, since none of them can be
 // trusted. Unknown dimensions are also empty.
@@ -73,6 +74,7 @@ type Row struct {
 	NormB      float64
 	Noise      float64
 	GhostSigma float64
+	Kernel     string
 
 	PeakX   int
 	PeakY   int
@@ -119,6 +121,12 @@ func (r Row) Fields() []string {
 		}
 		return strconv.FormatBool(v)
 	}
+	text := func(v string) string {
+		if failed {
+			return ""
+		}
+		return v
+	}
 
 	return []string{
 		r.File,
@@ -132,6 +140,7 @@ func (r Row) Fields() []string {
 		stat(r.NormB),
 		stat(r.Noise),
 		stat(r.GhostSigma),
+		text(r.Kernel),
 		count(r.PeakX),
 		count(r.PeakY),
 		scaled(r.PeakSNR),

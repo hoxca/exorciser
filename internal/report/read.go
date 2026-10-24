@@ -60,6 +60,7 @@ func parseRow(rec []string, index map[string]int) (Row, error) {
 	}
 
 	row := Row{File: cell("file"), Err: cell("error")}
+	row.Kernel = cell("kernel")
 	if row.File == "" {
 		return Row{}, errors.New("empty file name")
 	}

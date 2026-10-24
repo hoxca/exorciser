@@ -24,6 +24,14 @@ type Affine struct {
 	B float64
 }
 
+// Kernel names reported by Result.Kernel.
+const (
+	// KernelGaussian is a Gaussian matched filter from Options.Scales.
+	KernelGaussian = "gaussian"
+	// KernelProfile is the ghost profile from Options.Profile.
+	KernelProfile = "profile"
+)
+
 // Options configures a measurement.
 type Options struct {
 	// Window is the region of interest, validated against the image.
@@ -33,10 +41,22 @@ type Options struct {
 	Margin int
 	// Scales are the Gaussian sigmas, in pixels, tried by the matched filter.
 	Scales []float64
+	// Profile is an optional ghost shape extracted from a dirty frame. When
+	// set, it is tried in addition to Scales and the strongest response wins.
+	// A nil Profile disables profile scoring.
+	Profile *Profile
+	// SearchRadius bounds the peak search to this many pixels around the
+	// window centre. Zero searches the whole window.
+	SearchRadius int
 	// Stride is the subsampling step used to fit the affine transform.
 	Stride int
 	// ClipSigma masks residual pixels beyond this many noise sigmas.
 	ClipSigma float64
+	// ProfileClipSigma is the clipping threshold for the profile residual. It
+	// is looser than ClipSigma because the profile is matched to the ghost's
+	// own shape, and a compact ghost's core can exceed the Gaussian clip. The
+	// Gaussian scales keep the stricter clip so a star's wings do not dominate.
+	ProfileClipSigma float64
 }
 
 // Result describes the strongest brighter-than-reference feature found in the
@@ -46,6 +66,7 @@ type Result struct {
 	Affine  Affine
 	Noise   float64
 	Masked  int
+	Kernel  string
 	Scale   float64
 	PeakX   int
 	PeakY   int
@@ -65,6 +86,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.ClipSigma == 0 {
 		o.ClipSigma = 4
+	}
+	if o.ProfileClipSigma == 0 {
+		o.ProfileClipSigma = 10
 	}
 	return o
 }
@@ -246,48 +270,56 @@ func fitLine(fs, rs []float64, keep []bool) (Affine, bool) {
 	return Affine{A: a, B: meanF - a*meanR}, true
 }
 
-// Score fits the affine transform, removes the local background and returns the
-// strongest positive matched-filter response in the window. A feature darker
-// than the reference has a negative response and is never selected, so PeakSNR
-// and PeakAmp are non-negative.
-func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
-	opts = opts.withDefaults()
+// prepared is the residual plane after the affine transform, background
+// removal, clipping and mask dilation. Its res and valid slices form a square
+// of side ext, centred on the window.
+type prepared struct {
+	affine Affine
+	noise  float64
+	res    []float64
+	valid  []float64
+	ext    int
+	masked int
+}
 
-	win := opts.Window
+// prepare fits the affine transform and background, then builds the clipped,
+// masked residual over a square that extends kernelRadius pixels beyond win.
+// The background ring is the margin-wide border outside that square.
+func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, stride int, clipSigma float64) (prepared, error) {
 	if err := win.Validate(w, h); err != nil {
-		return Result{}, err
+		return prepared{}, err
 	}
-	for _, s := range opts.Scales {
-		if s <= 0 || !finite(s) {
-			return Result{}, fmt.Errorf("ghost scale must be positive, got %v", s)
-		}
+	if kernelRadius < 0 {
+		return prepared{}, fmt.Errorf("kernel radius must not be negative, got %d", kernelRadius)
 	}
-	maxRadius := MaxKernelRadius(opts.Scales)
-	if opts.Margin <= maxRadius {
-		return Result{}, fmt.Errorf("margin %d must exceed the kernel radius %d", opts.Margin, maxRadius)
+	if margin <= kernelRadius {
+		return prepared{}, fmt.Errorf("margin %d must exceed the kernel radius %d", margin, kernelRadius)
+	}
+	if clipSigma <= 0 || !finite(clipSigma) {
+		return prepared{}, fmt.Errorf("clip sigma must be positive, got %v", clipSigma)
 	}
 
-	aff, err := Fit(frame, ref, w, h, opts.Stride)
+	aff, err := Fit(frame, ref, w, h, stride)
 	if err != nil {
-		return Result{}, err
+		return prepared{}, err
 	}
 
 	cx := win.X + win.Size/2
 	cy := win.Y + win.Size/2
-	half := win.Size/2 + maxRadius
+	half := win.Size/2 + kernelRadius
 	x0, y0 := cx-half, cy-half
 	ext := 2 * half
 	if x0 < 0 || y0 < 0 || x0+ext > w || y0+ext > h {
-		return Result{}, fmt.Errorf("window plus a %d px kernel radius does not fit a %d×%d image",
-			maxRadius, w, h)
+		return prepared{}, fmt.Errorf("window plus a %d px kernel radius does not fit a %d×%d image",
+			kernelRadius, w, h)
 	}
 
 	// Background ring: the outer square minus the kernel support square.
-	ox0, oy0 := win.X-opts.Margin, win.Y-opts.Margin
-	ox1, oy1 := win.X+win.Size+opts.Margin, win.Y+win.Size+opts.Margin
+	ox0, oy0 := win.X-margin, win.Y-margin
+	ox1, oy1 := win.X+win.Size+margin, win.Y+win.Size+margin
 	if ox0 < 0 || oy0 < 0 || ox1 > w || oy1 > h {
-		return Result{}, fmt.Errorf("window plus a %d px margin does not fit a %d×%d image",
-			opts.Margin, w, h)
+		return prepared{}, fmt.Errorf("window plus a %d px margin does not fit a %d×%d image",
+			margin, w, h)
 	}
 
 	us := make([]float64, 0, (ox1-ox0)*(oy1-oy0))
@@ -311,22 +343,22 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 		}
 	}
 	if len(zs) < 100 {
-		return Result{}, fmt.Errorf("only %d background pixels in the margin, need 100", len(zs))
+		return prepared{}, fmt.Errorf("only %d background pixels in the margin, need 100", len(zs))
 	}
 
 	bg, noise, err := fitBackground(us, vs, zs)
 	if err != nil {
-		return Result{}, err
+		return prepared{}, err
 	}
 	if noise <= 0 {
-		return Result{}, errors.New("background noise estimate is zero")
+		return prepared{}, errors.New("background noise estimate is zero")
 	}
 
 	// Residual over the kernel support square, with outliers masked.
 	res := make([]float64, ext*ext)
 	valid := make([]float64, ext*ext)
 	masked := 0
-	limit := opts.ClipSigma * noise
+	limit := clipSigma * noise
 	for j := 0; j < ext; j++ {
 		y := y0 + j
 		line := y * w
@@ -357,9 +389,56 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 		}
 	}
 
-	result := Result{Affine: aff, Noise: noise, Masked: masked}
+	return prepared{affine: aff, noise: noise, res: res, valid: valid, ext: ext, masked: masked}, nil
+}
+
+// Score fits the affine transform, removes the local background and returns the
+// strongest positive matched-filter response in the window. A feature darker
+// than the reference has a negative response and is never selected, so PeakSNR
+// and PeakAmp are non-negative.
+//
+// Score tries every Gaussian scale and, when Options.Profile is set, the ghost
+// profile as well. Result.Kernel names the winner.
+func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
+	opts = opts.withDefaults()
+
+	win := opts.Window
+	if err := win.Validate(w, h); err != nil {
+		return Result{}, err
+	}
+	for _, s := range opts.Scales {
+		if s <= 0 || !finite(s) {
+			return Result{}, fmt.Errorf("ghost scale must be positive, got %v", s)
+		}
+	}
+	if opts.SearchRadius < 0 {
+		return Result{}, fmt.Errorf("search radius must not be negative, got %d", opts.SearchRadius)
+	}
+	if opts.ProfileClipSigma <= 0 || !finite(opts.ProfileClipSigma) {
+		return Result{}, fmt.Errorf("profile clip sigma must be positive, got %v", opts.ProfileClipSigma)
+	}
+
+	maxRadius := MaxKernelRadius(opts.Scales)
+	if opts.Profile != nil {
+		if err := opts.Profile.validate(); err != nil {
+			return Result{}, err
+		}
+		maxRadius = max(maxRadius, opts.Profile.Radius)
+	}
+	if opts.Margin <= maxRadius {
+		return Result{}, fmt.Errorf("margin %d must exceed the kernel radius %d", opts.Margin, maxRadius)
+	}
+
+	prep, err := prepare(frame, ref, w, h, win, maxRadius, opts.Margin, opts.Stride, opts.ClipSigma)
+	if err != nil {
+		return Result{}, err
+	}
+
+	result := Result{Affine: prep.affine, Noise: prep.noise, Masked: prep.masked}
 	best := 0.0
 	searched := 0
+	lo, hi := searchBounds(win.Size, maxRadius, opts.SearchRadius)
+
 	for _, scale := range opts.Scales {
 		radius := int(math.Ceil(3 * scale))
 		kernel := gaussianWeights(radius, scale)
@@ -369,24 +448,25 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 		}
 		wFull *= wFull
 
-		signal := convSep(res, ext, kernel)
-		weight := convSep(valid, ext, kernel)
-		noiseSq := convSep(valid, ext, squared(kernel))
+		signal := convSep(prep.res, prep.ext, kernel)
+		weight := convSep(prep.valid, prep.ext, kernel)
+		noiseSq := convSep(prep.valid, prep.ext, squared(kernel))
 
-		for j := maxRadius; j < maxRadius+win.Size; j++ {
-			for i := maxRadius; i < maxRadius+win.Size; i++ {
-				idx := j*ext + i
+		for j := lo; j < hi; j++ {
+			for i := lo; i < hi; i++ {
+				idx := j*prep.ext + i
 				if weight[idx] <= 0.5*wFull {
 					continue
 				}
 				searched++
-				snr := signal[idx] / (noise * math.Sqrt(noiseSq[idx]))
+				snr := signal[idx] / (prep.noise * math.Sqrt(noiseSq[idx]))
 				// Only brighter-than-reference features count. best starts at
 				// zero, so a dark response is rejected here.
 				if snr <= best {
 					continue
 				}
 				best = snr
+				result.Kernel = KernelGaussian
 				result.Scale = scale
 				result.PeakSNR = snr
 				result.PeakAmp = signal[idx] / weight[idx]
@@ -395,10 +475,66 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 			}
 		}
 	}
+
+	if opts.Profile != nil {
+		profilePrep := prep
+		if opts.ProfileClipSigma != opts.ClipSigma {
+			profilePrep, err = prepare(frame, ref, w, h, win, maxRadius, opts.Margin, opts.Stride, opts.ProfileClipSigma)
+			if err != nil {
+				return Result{}, err
+			}
+		}
+
+		kernel := opts.Profile.normalized()
+		radius := opts.Profile.Radius
+		// The profile is normalised to sum one, so a full-weight kernel has
+		// wFull = 1.
+		const wFull = 1.0
+
+		signal := conv2D(profilePrep.res, profilePrep.ext, kernel, radius)
+		weight := conv2D(profilePrep.valid, profilePrep.ext, kernel, radius)
+		noiseSq := conv2D(profilePrep.valid, profilePrep.ext, squared(kernel), radius)
+
+		for j := lo; j < hi; j++ {
+			for i := lo; i < hi; i++ {
+				idx := j*profilePrep.ext + i
+				if weight[idx] <= 0.5*wFull {
+					continue
+				}
+				searched++
+				snr := signal[idx] / (profilePrep.noise * math.Sqrt(noiseSq[idx]))
+				if snr <= best {
+					continue
+				}
+				best = snr
+				result.Kernel = KernelProfile
+				result.Scale = 0
+				result.PeakSNR = snr
+				result.PeakAmp = signal[idx] / weight[idx]
+				result.PeakX = win.X + i - maxRadius
+				result.PeakY = win.Y + j - maxRadius
+			}
+		}
+	}
+
 	if searched == 0 {
 		return Result{}, errors.New("window is entirely masked")
 	}
 	return result, nil
+}
+
+// searchBounds returns the support-plane index range searched for a peak. The
+// window occupies [offset, offset+size); a positive searchRadius narrows that
+// to a square around its middle.
+func searchBounds(size, offset, searchRadius int) (lo, hi int) {
+	lo, hi = offset, offset+size
+	if searchRadius <= 0 {
+		return lo, hi
+	}
+	centre := offset + size/2
+	lo = max(lo, centre-searchRadius)
+	hi = min(hi, centre+searchRadius+1)
+	return lo, hi
 }
 
 // plane is a first-order background: c0 + c1*u + c2*v around a local origin.
@@ -532,6 +668,30 @@ func squared(k []float64) []float64 {
 // interior from outside the support square.
 func convSep(src []float64, e int, kernel []float64) []float64 {
 	return convolvePlane(src, e, e, kernel, 1)
+}
+
+// conv2D convolves src, an e×e square, with a non-separable (2r+1)² kernel
+// centred on its middle element. Pixels outside the square are treated as zero,
+// matching convSep.
+func conv2D(src []float64, e int, kernel []float64, r int) []float64 {
+	side := 2*r + 1
+	out := make([]float64, e*e)
+	for y := 0; y < e; y++ {
+		for x := 0; x < e; x++ {
+			var sum float64
+			y0, y1 := max(0, y-r), min(e-1, y+r)
+			x0, x1 := max(0, x-r), min(e-1, x+r)
+			for yy := y0; yy <= y1; yy++ {
+				line := yy * e
+				kline := (yy - y + r) * side
+				for xx := x0; xx <= x1; xx++ {
+					sum += src[line+xx] * kernel[kline+xx-x+r]
+				}
+			}
+			out[y*e+x] = sum
+		}
+	}
+	return out
 }
 
 // dilateInvalid clears valid pixels within r pixels of an invalid one, so a

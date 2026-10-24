@@ -27,6 +27,7 @@ type detectOptions struct {
 	input     string
 	outputDir string
 	reference string
+	dirty     string
 	filter    string
 	window    int
 	workers   int
@@ -36,11 +37,21 @@ type detectOptions struct {
 	minSNR float64
 	// coord is the window centre, or nil to use the image centre.
 	coord *point
+	// dirtyCoord is the artefact centre in the dirty frame. It defaults to
+	// coord when --dirty-coord is omitted.
+	dirtyCoord *point
+	// profileRadius is the half-width of the extracted ghost profile.
+	profileRadius int
+	// searchRadius bounds the peak search around the window centre; zero
+	// searches the whole window.
+	searchRadius int
+	// profile is set by runDetect after the dirty frame is extracted.
+	profile *detect.Profile
 }
 
 func newDetectCmd() *cobra.Command {
 	opts := &detectOptions{}
-	var coord, scales string
+	var coord, dirtyCoord, scales string
 
 	cmd := &cobra.Command{
 		Use:   "detect [path...]",
@@ -60,18 +71,33 @@ response, peak_x and peak_y its position, and peak_amp its smoothed amplitude
 in pixel units: the kernel-weighted mean residual, always positive because a
 darker feature is ignored.
 
+A dirty frame can supply the ghost's actual shape. --dirty is resolved like
+--reference: a frame index in the selected filter, such as 003 for
+..._BIN1_003_..., or a path to an .xisf file. --dirty-coord is the artefact
+centre in that frame as x,y; it defaults to --coord when omitted. The dirty
+frame is aligned to the clean reference, the residual around that centre is
+reduced to a radial median, and the result joins the Gaussian kernels as an
+extra matched filter. The report's kernel column names the winner, and
+ghost_sigma is 0 when the profile wins. --profile-radius sets the profile
+support radius (default 16); --margin must exceed it. The dirty frame is
+skipped from the analysis, just like the reference.
+
 Only features brighter than the reference are scored. A dark artefact can
 produce a large response of the opposite sign, but it is ignored, so it never
 sets detected, never hides a fainter bright feature in the same window, and
 never enters the report as a negative peak_snr. The score is the strongest
 positive peak anywhere in the window, not the value at a fixed position:
 registration moves a sensor artefact by each frame's alignment offset, so a
-fixed-position score would miss the ghost. detected is true when peak_snr
-reaches --min-snr, and the report's peak_x and peak_y locate the feature so a
+fixed-position score would miss the ghost. Use --search-radius to bound that
+search around the window centre. detected is true when peak_snr reaches
+--min-snr, and the report's peak_x and peak_y locate the feature so a
 suspicious row can be inspected.
 
-Pixels beyond four times the background noise are masked before filtering,
-which removes stars and cosmic rays without a star mask. The background plane is
+Pixels beyond four times the background noise are masked before the Gaussian
+filtering, which removes stars and cosmic rays without a star mask. The profile
+is scored on a looser ten-sigma mask: it is matched to the ghost's own shape,
+which may have a compact core that the four-sigma mask would remove along with
+the stars. Bright stars are still clipped and dilated. The background plane is
 fitted on the --margin ring outside the window, so the feature itself never
 enters the model.
 
@@ -91,7 +117,8 @@ _FILTER-L_mono selects L; L, R, G, B, S, H and O are recognised. Use --filter to
 select one filter from a parent directory. A run processes one filter at a time
 and writes its report to <output>/<filter>/detection.csv. The report is
 semicolon-delimited and uses a decimal comma.`,
-		Args: cobra.ArbitraryArgs,
+		Example: `  exorciser detect --reference 011 --dirty 003 --dirty-coord 2463,1989 --coord 2454,1990 --filter B`,
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if opts.window <= 0 {
 				return fmt.Errorf("--window must be positive, got %d", opts.window)
@@ -109,6 +136,12 @@ semicolon-delimited and uses a decimal comma.`,
 				return fmt.Errorf("--output is a directory and the file is always %s, got %q",
 					detectionName, opts.outputDir)
 			}
+			if opts.profileRadius < 1 {
+				return fmt.Errorf("--profile-radius must be positive, got %d", opts.profileRadius)
+			}
+			if opts.searchRadius < 0 {
+				return fmt.Errorf("--search-radius must not be negative, got %d", opts.searchRadius)
+			}
 
 			parsed, err := parseScales(scales)
 			if err != nil {
@@ -116,17 +149,35 @@ semicolon-delimited and uses a decimal comma.`,
 			}
 			opts.scales = parsed
 
-			radius := detect.MaxKernelRadius(opts.scales)
-			if opts.margin <= radius {
-				return fmt.Errorf("--margin must exceed the largest kernel radius %d (3 x the widest --ghost-sigma), got %d",
-					radius, opts.margin)
-			}
-
 			point, err := parseCoord(coord)
 			if err != nil {
 				return err
 			}
 			opts.coord = point
+
+			dirtyPoint, err := parseCoordFlag(dirtyCoord, "--dirty-coord")
+			if err != nil {
+				return err
+			}
+			switch {
+			case dirtyPoint != nil && opts.dirty == "":
+				return errors.New("--dirty-coord requires --dirty")
+			case opts.dirty != "" && dirtyPoint == nil:
+				if opts.coord == nil {
+					return errors.New("--dirty requires --dirty-coord, or --coord to use as its centre")
+				}
+				dirtyPoint = opts.coord
+			}
+			opts.dirtyCoord = dirtyPoint
+
+			radius := detect.MaxKernelRadius(opts.scales)
+			if opts.dirty != "" && opts.profileRadius > radius {
+				radius = opts.profileRadius
+			}
+			if opts.margin <= radius {
+				return fmt.Errorf("--margin must exceed the largest kernel radius %d, got %d",
+					radius, opts.margin)
+			}
 
 			roots := args
 			if len(roots) == 0 {
@@ -139,6 +190,10 @@ semicolon-delimited and uses a decimal comma.`,
 	flags := cmd.Flags()
 	flags.StringVar(&opts.reference, "reference", "",
 		"reference frame: a frame index (e.g. 006) in the selected filter, or a path to an .xisf file (required)")
+	flags.StringVar(&opts.dirty, "dirty", "",
+		"dirty frame used to extract a ghost profile: a frame index (e.g. 003) in the selected filter, or a path to an .xisf file")
+	flags.StringVar(&dirtyCoord, "dirty-coord", "",
+		"artefact centre in the dirty frame as x,y in pixels (default: --coord)")
 	flags.StringVarP(&opts.input, "input", "i", defaultInput,
 		"directory searched for .xisf files when no path is given")
 	flags.StringVar(&opts.filter, "filter", "",
@@ -155,6 +210,10 @@ semicolon-delimited and uses a decimal comma.`,
 		"matched-filter scales in pixels, comma separated")
 	flags.IntVar(&opts.margin, "margin", 64,
 		"width in pixels of the background ring around the window")
+	flags.IntVar(&opts.profileRadius, "profile-radius", 16,
+		"radius in pixels of the ghost profile extracted from --dirty")
+	flags.IntVar(&opts.searchRadius, "search-radius", 0,
+		"bound the peak search to this radius in pixels around the window centre (0: whole window)")
 	flags.Float64Var(&opts.minSNR, "min-snr", 6,
 		"peak significance at which a frame is reported as detected")
 
@@ -186,9 +245,14 @@ type point struct {
 	x, y int
 }
 
-// parseCoord parses an "x,y" pixel coordinate. An empty string means no
-// explicit coordinate and returns a nil point.
+// parseCoord parses an "x,y" pixel coordinate for --coord.
 func parseCoord(s string) (*point, error) {
+	return parseCoordFlag(s, "--coord")
+}
+
+// parseCoordFlag parses an "x,y" pixel coordinate, naming flag in errors. An
+// empty string means no explicit coordinate and returns a nil point.
+func parseCoordFlag(s, flag string) (*point, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil, nil
@@ -196,17 +260,17 @@ func parseCoord(s string) (*point, error) {
 
 	parts := strings.Split(s, ",")
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("--coord wants two comma-separated integers, got %q", s)
+		return nil, fmt.Errorf("%s wants two comma-separated integers, got %q", flag, s)
 	}
 
 	var values [2]int
 	for i, part := range parts {
 		n, err := strconv.Atoi(strings.TrimSpace(part))
 		if err != nil {
-			return nil, fmt.Errorf("--coord wants two comma-separated integers, got %q", s)
+			return nil, fmt.Errorf("%s wants two comma-separated integers, got %q", flag, s)
 		}
 		if n < 0 {
-			return nil, fmt.Errorf("--coord values must not be negative, got %d", n)
+			return nil, fmt.Errorf("%s values must not be negative, got %d", flag, n)
 		}
 		values[i] = n
 	}
@@ -238,25 +302,81 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 		return err
 	}
 
-	// The reference is resolved after the filter so an index is looked up in the
-	// directory selected by --filter rather than in the whole input tree.
-	refPath, err := resolveReference(opts.reference, paths, filter)
+	// Both frames are resolved before either is skipped, so --dirty may name
+	// the reference and be rejected explicitly rather than as a missing index.
+	refPath, err := resolveFrame(opts.reference, paths, filter, "--reference")
 	if err != nil {
 		return err
+	}
+
+	var dirtyPath string
+	if opts.dirty != "" {
+		dirtyPath, err = resolveFrame(opts.dirty, paths, filter, "--dirty")
+		if err != nil {
+			return err
+		}
+		if samePath(dirtyPath, refPath) {
+			return errors.New("--dirty and --reference name the same frame")
+		}
 	}
 
 	paths, skipped := excludeReference(paths, refPath)
 	if skipped {
 		slog.Info("reference skipped from the batch", "file", filepath.Base(refPath))
 	}
+	if dirtyPath != "" {
+		paths, skipped = excludeReference(paths, dirtyPath)
+		if skipped {
+			slog.Info("dirty frame skipped from the batch", "file", filepath.Base(dirtyPath))
+		}
+	}
 	if len(paths) == 0 {
-		return fmt.Errorf("no frames left to analyse in %s after skipping the reference", strings.Join(roots, ", "))
+		skipped := "the reference"
+		if dirtyPath != "" {
+			skipped = "the reference and dirty frame"
+		}
+		return fmt.Errorf("no frames left to analyse in %s after skipping %s",
+			strings.Join(roots, ", "), skipped)
 	}
 	outDir := outputFilterDir(opts.outputDir, filter)
 
-	ref, err := loadReference(refPath)
+	ref, err := loadPlaneData(refPath)
 	if err != nil {
 		return fmt.Errorf("load reference: %w", err)
+	}
+
+	if dirtyPath != "" {
+		if opts.dirtyCoord == nil {
+			return errors.New("--dirty requires --dirty-coord")
+		}
+		dirty, err := loadPlaneData(dirtyPath)
+		if err != nil {
+			return fmt.Errorf("load dirty frame: %w", err)
+		}
+		if dirty.width != ref.width || dirty.height != ref.height {
+			return fmt.Errorf("dirty frame is %d×%d but the reference is %d×%d",
+				dirty.width, dirty.height, ref.width, ref.height)
+		}
+		profile, err := detect.ExtractProfile(dirty.plane, ref.plane, ref.width, ref.height,
+			detect.ProfileOptions{
+				X:      opts.dirtyCoord.x,
+				Y:      opts.dirtyCoord.y,
+				Radius: opts.profileRadius,
+				Margin: opts.margin,
+			})
+		if err != nil {
+			return fmt.Errorf("extract ghost profile from %s: %w", filepath.Base(dirtyPath), err)
+		}
+		opts.profile = &profile
+		slog.Info("ghost profile extracted",
+			"dirty", filepath.Base(dirtyPath),
+			"x", profile.X,
+			"y", profile.Y,
+			"shift_x", profile.ShiftX,
+			"shift_y", profile.ShiftY,
+			"radius", profile.Radius,
+			"masked", profile.Masked,
+			"noise", profile.Noise)
 	}
 
 	slog.Info("analysing images",
@@ -265,7 +385,8 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 		"workers", opts.workers,
 		"window", opts.window,
 		"scales", opts.scales,
-		"reference", filepath.Base(refPath))
+		"reference", filepath.Base(refPath),
+		"profile", opts.profile != nil)
 
 	started := time.Now()
 	rows := detectAll(ctx, paths, ref, opts)
@@ -305,33 +426,20 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 	return nil
 }
 
-// reference is the decoded reference plane, shared read-only by every worker.
-type reference struct {
+// planeData is a decoded single-channel image, shared read-only by every
+// worker.
+type planeData struct {
 	plane  []float32
 	width  int
 	height int
 }
 
-func loadReference(path string) (*reference, error) {
-	f, err := xisf.Open(path)
+func loadPlaneData(path string) (*planeData, error) {
+	plane, w, h, err := loadPlane(path)
 	if err != nil {
 		return nil, err
 	}
-	images := f.Images()
-	if len(images) == 0 {
-		return nil, errors.New("file contains no images")
-	}
-
-	im := images[0]
-	if im.Channels() > 1 {
-		slog.Warn("reference has several channels, only channel 0 is used",
-			"file", filepath.Base(path), "channels", im.Channels())
-	}
-	plane, err := plane32(im)
-	if err != nil {
-		return nil, err
-	}
-	return &reference{plane: plane, width: im.Width(), height: im.Height()}, nil
+	return &planeData{plane: plane, width: w, height: h}, nil
 }
 
 // plane32 returns the first channel as float32. The returned slice aliases im's
@@ -351,10 +459,11 @@ func plane32(im *xisf.Image) ([]float32, error) {
 	return plane, nil
 }
 
-// resolveReference maps --reference to a file. A value of digits is a frame
-// index looked up among the paths of the selected filter; anything else is a
-// path and is returned unchanged.
-func resolveReference(value string, paths []string, filter string) (string, error) {
+// resolveFrame maps a --reference or --dirty value to a file. A value of
+// digits is a frame index looked up among the paths of the selected filter;
+// anything else is a path and is returned unchanged. flag names the option in
+// error messages.
+func resolveFrame(value string, paths []string, filter, flag string) (string, error) {
 	value = strings.TrimSpace(value)
 	if !allDigits(value) {
 		return value, nil
@@ -373,7 +482,8 @@ func resolveReference(value string, paths []string, filter string) (string, erro
 
 	switch len(matches) {
 	case 0:
-		return "", fmt.Errorf("no frame with index %s in filter %s; check --reference and --filter", value, filter)
+		return "", fmt.Errorf("no frame with index %s in filter %s; check %s and --filter",
+			value, filter, flag)
 	case 1:
 		return matches[0], nil
 	default:
@@ -416,8 +526,8 @@ func allDigits(s string) bool {
 	return true
 }
 
-// excludeReference drops the reference file from paths, comparing absolute
-// paths so a relative --reference still matches the collected files.
+// excludeReference drops refPath from paths, comparing absolute paths so a
+// relative --reference still matches the collected files.
 func excludeReference(paths []string, refPath string) ([]string, bool) {
 	refAbs, err := filepath.Abs(refPath)
 	if err != nil {
@@ -440,10 +550,23 @@ func excludeReference(paths []string, refPath string) ([]string, bool) {
 	return kept, skipped
 }
 
+// samePath reports whether a and b name the same file, comparing absolute
+// paths so a relative option still matches a collected path.
+func samePath(a, b string) bool {
+	abs := func(p string) string {
+		v, err := filepath.Abs(p)
+		if err != nil {
+			return filepath.Clean(p)
+		}
+		return v
+	}
+	return a != "" && b != "" && abs(a) == abs(b)
+}
+
 // detectAll measures paths with a pool of opts.workers goroutines. The
 // reference plane is shared read-only, so it is decoded once. Results keep the
 // order of paths.
-func detectAll(ctx context.Context, paths []string, ref *reference, opts *detectOptions) []report.Row {
+func detectAll(ctx context.Context, paths []string, ref *planeData, opts *detectOptions) []report.Row {
 	rows := make([]report.Row, len(paths))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
@@ -478,7 +601,7 @@ feed:
 // detector holds the per-goroutine state. The reference is read-only and shared;
 // a detector is not safe for concurrent use.
 type detector struct {
-	ref  *reference
+	ref  *planeData
 	opts *detectOptions
 }
 
@@ -527,9 +650,11 @@ func (d *detector) detect(path string) (row report.Row) {
 		return row
 	}
 	res, err := detect.Score(plane, d.ref.plane, row.Width, row.Height, detect.Options{
-		Window: win,
-		Margin: d.opts.margin,
-		Scales: d.opts.scales,
+		Window:       win,
+		Margin:       d.opts.margin,
+		Scales:       d.opts.scales,
+		Profile:      d.opts.profile,
+		SearchRadius: d.opts.searchRadius,
 	})
 	if err != nil {
 		row.Err = err.Error()
@@ -539,6 +664,7 @@ func (d *detector) detect(path string) (row report.Row) {
 	row.NormA, row.NormB = res.Affine.A, res.Affine.B
 	row.Noise = res.Noise
 	row.GhostSigma = res.Scale
+	row.Kernel = res.Kernel
 	row.PeakX, row.PeakY = res.PeakX, res.PeakY
 	row.PeakSNR, row.PeakAmp = res.PeakSNR, res.PeakAmp
 	row.Clipped = res.Masked
@@ -555,6 +681,7 @@ func logDetection(r report.Row) {
 		"file", r.File,
 		"detected", r.Detected,
 		"peak_snr", r.PeakSNR,
+		"kernel", r.Kernel,
 		"ghost_sigma", r.GhostSigma,
 		"peak_x", r.PeakX,
 		"peak_y", r.PeakY,
