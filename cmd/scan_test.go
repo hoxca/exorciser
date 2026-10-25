@@ -169,6 +169,27 @@ func TestResolveScanPaths(t *testing.T) {
 	}
 }
 
+func TestStackNames(t *testing.T) {
+	tests := []struct {
+		kind   string
+		filter string
+		file   string
+		id     string
+	}{
+		{stackCleanKind, "L", "L_stack_clean.xisf", "clean_L"},
+		{stackGhostKind, "B", "B_stack_ghost.xisf", "ghost_B"},
+		{stackDetectedKind, "R", "R_stack_detected.xisf", "detected_R"},
+	}
+	for _, tt := range tests {
+		if got := stackFileName(tt.kind, tt.filter); got != tt.file {
+			t.Errorf("stackFileName(%q,%q) = %q, want %q", tt.kind, tt.filter, got, tt.file)
+		}
+		if got := stackWindowID(tt.kind, tt.filter); got != tt.id {
+			t.Errorf("stackWindowID(%q,%q) = %q, want %q", tt.kind, tt.filter, got, tt.id)
+		}
+	}
+}
+
 func TestWriteStack(t *testing.T) {
 	dir := t.TempDir()
 	template := filepath.Join(dir, "template.xisf")
@@ -181,7 +202,7 @@ func TestWriteStack(t *testing.T) {
 	}
 	writeFloatXISF(t, template, w, h, plane)
 
-	if err := writeStack(output, template, plane, w, h, "stack_ghost"); err != nil {
+	if err := writeStack(output, template, plane, w, h, "ghost_L"); err != nil {
 		t.Fatalf("writeStack: %v", err)
 	}
 
@@ -209,11 +230,18 @@ func TestWriteStack(t *testing.T) {
 	if low, high, ok := im.RepresentableRange(); !ok || low != 0 || high != 1 {
 		t.Errorf("representable range = %v:%v (ok=%v), want 0:1", low, high, ok)
 	}
-	if im.ID != "stack_ghost" {
-		t.Errorf("id = %q, want stack_ghost", im.ID)
+	if im.ID != "ghost_L" {
+		t.Errorf("id = %q, want ghost_L", im.ID)
 	}
 	if im.ImageType != "MasterLight" {
 		t.Errorf("image type = %q, want MasterLight", im.ImageType)
+	}
+	p, ok := im.Property(overridableIdentifier)
+	if !ok {
+		t.Fatalf("stack has no %s property, PixInsight would rename the view", overridableIdentifier)
+	}
+	if p.Type != "Boolean" || p.Value != "false" {
+		t.Errorf("%s = %s:%s, want Boolean:false", overridableIdentifier, p.Type, p.Value)
 	}
 
 	got, err := plane32(im)
@@ -233,7 +261,7 @@ func TestWriteStack(t *testing.T) {
 	bareTemplate := filepath.Join(dir, "template-bare.xisf")
 	bareOutput := filepath.Join(dir, "stack-bare.xisf")
 	writeFloatXISFWithoutBounds(t, bareTemplate, w, h, plane)
-	if err := writeStack(bareOutput, bareTemplate, plane, w, h, "stack_ghost"); err != nil {
+	if err := writeStack(bareOutput, bareTemplate, plane, w, h, "ghost_L"); err != nil {
 		t.Fatalf("writeStack without template bounds: %v", err)
 	}
 	bare, err := xisf.Open(bareOutput)
@@ -360,11 +388,11 @@ func TestRunScanEndToEnd(t *testing.T) {
 		t.Errorf("no artefact within 8 px of the injected ghost (%d,%d): %v", scanGhostX, scanGhostY, artefacts)
 	}
 
-	ghostPlane, gw, gh, err := loadPlane(filepath.Join(filterOut, stackGhostName))
+	ghostPlane, gw, gh, err := loadPlane(filepath.Join(filterOut, stackFileName(stackGhostKind, "L")))
 	if err != nil {
 		t.Fatalf("load ghost master: %v", err)
 	}
-	cleanPlane, cw, ch, err := loadPlane(filepath.Join(filterOut, stackCleanName))
+	cleanPlane, cw, ch, err := loadPlane(filepath.Join(filterOut, stackFileName(stackCleanKind, "L")))
 	if err != nil {
 		t.Fatalf("load clean master: %v", err)
 	}

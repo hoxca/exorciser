@@ -18,6 +18,10 @@ import (
 
 const attachmentAlignment = 4096
 
+// overridableIdentifier tells PixInsight to keep the XISF image id as the
+// window name instead of deriving one from imageType.
+const overridableIdentifier = `<Property id="PCL:OverridableIdentifier" type="Boolean" value="false"/>`
+
 // WriteRGB writes pixels as a zlib-compressed Float32 RGB XISF image.
 //
 // len(pixels) must be 3*w*h. The first w*h samples are the red channel, the
@@ -108,8 +112,8 @@ func headerXML(id string, w, h int, offset, storedSize, rawSize int64) string {
 		fmt.Sprintf(
 			`<Image id="%s" geometry="%d:%d:3" sampleFormat="Float32" bounds="0:1" `+
 				`colorSpace="RGB" pixelStorage="Normal" location="attachment:%d:%d" `+
-				`imageType="MasterLight" compression="zlib:%d"/>`,
-			html.EscapeString(id), w, h, offset, storedSize, rawSize,
+				`imageType="MasterLight" compression="zlib:%d">%s</Image>`,
+			html.EscapeString(id), w, h, offset, storedSize, rawSize, overridableIdentifier,
 		) +
 		`<Metadata>` +
 		fmt.Sprintf(`<Property id="XISF:CreationTime" type="String">%s</Property>`,

@@ -21,10 +21,26 @@ import (
 )
 
 const (
-	artefactsName  = "artefacts.csv"
-	stackGhostName = "stack_ghost.xisf"
-	stackCleanName = "stack_clean.xisf"
+	artefactsName     = "artefacts.csv"
+	stackCleanKind    = "stack_clean"
+	stackGhostKind    = "stack_ghost"
+	stackDetectedKind = "stack_detected"
+
+	// overridableIdentifier tells PixInsight to keep the XISF image id as the
+	// window name instead of deriving one from imageType.
+	overridableIdentifier = "PCL:OverridableIdentifier"
 )
+
+// stackFileName returns the filter-prefixed XISF export name, for example
+// L_stack_clean.xisf.
+func stackFileName(kind, filter string) string {
+	return filter + "_" + kind + ".xisf"
+}
+
+// stackWindowID returns the XISF window name, for example clean_L.
+func stackWindowID(kind, filter string) string {
+	return strings.TrimPrefix(kind, "stack_") + "_" + filter
+}
 
 type scanOptions struct {
 	report          string
@@ -68,9 +84,10 @@ a peak close to the threshold may hide a faint ghost. Clean frames are taken in
 report order, up to --count. Every frame is normalised to the first selected
 clean frame with an affine transform (scale and offset), then the group is
 averaged with per-pixel sigma clipping. The two masters are written as
-stack_ghost.xisf and stack_clean.xisf inside <output>/<filter>. Their XISF
-header is inherited from the first frame of the group, with Float32 samples and
-the template's declared bounds.
+<filter>_stack_ghost.xisf and <filter>_stack_clean.xisf inside
+<output>/<filter>, with XISF window names ghost_<filter> and clean_<filter>.
+Their XISF header is inherited from the first frame of the group, with Float32
+samples and the template's declared bounds.
 
 The difference is searched with Gaussian matched filters at several scales.
 Every local maximum whose absolute signal-to-noise ratio reaches --min-snr and
@@ -312,10 +329,11 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		"frames", len(cleanFrames),
 		"rejected", clean.Rejected,
 		"invalid", clean.Invalid)
-	if err := writeStack(filepath.Join(outDir, stackCleanName), cleanPaths[0], clean.Plane, w, h, "stack_clean"); err != nil {
-		return fmt.Errorf("write %s: %w", stackCleanName, err)
+	cleanPath := filepath.Join(outDir, stackFileName(stackCleanKind, filter))
+	if err := writeStack(cleanPath, cleanPaths[0], clean.Plane, w, h, stackWindowID(stackCleanKind, filter)); err != nil {
+		return fmt.Errorf("write %s: %w", cleanPath, err)
 	}
-	slog.Info("master written", "path", filepath.Join(outDir, stackCleanName))
+	slog.Info("master written", "path", cleanPath)
 	clear(cleanFrames)
 	runtime.GC()
 
@@ -379,10 +397,11 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		"frames", len(ghostFrames),
 		"rejected", ghost.Rejected,
 		"invalid", ghost.Invalid)
-	if err := writeStack(filepath.Join(outDir, stackGhostName), ghostPaths[0], ghost.Plane, w, h, "stack_ghost"); err != nil {
-		return fmt.Errorf("write %s: %w", stackGhostName, err)
+	ghostPath := filepath.Join(outDir, stackFileName(stackGhostKind, filter))
+	if err := writeStack(ghostPath, ghostPaths[0], ghost.Plane, w, h, stackWindowID(stackGhostKind, filter)); err != nil {
+		return fmt.Errorf("write %s: %w", ghostPath, err)
 	}
-	slog.Info("master written", "path", filepath.Join(outDir, stackGhostName))
+	slog.Info("master written", "path", ghostPath)
 	clear(ghostFrames)
 	runtime.GC()
 
@@ -697,6 +716,15 @@ func writeStack(path, template string, plane []float32, w, h int, id string) err
 	im.HasOffset = false
 	im.ID = id
 	im.ImageType = "MasterLight"
+	if _, ok := im.Property(overridableIdentifier); !ok {
+		if err := im.AddProperty(xisf.Property{
+			ID:    overridableIdentifier,
+			Type:  "Boolean",
+			Value: "false",
+		}); err != nil {
+			return fmt.Errorf("add %s: %w", overridableIdentifier, err)
+		}
+	}
 	if err := xisf.SetPixels(im, plane); err != nil {
 		return err
 	}

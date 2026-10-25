@@ -14,8 +14,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const stackDetectedName = "stack_detected.xisf"
-
 type annotateOptions struct {
 	image      string
 	artefacts  string
@@ -43,8 +41,9 @@ pixels, as written by scan.
 
 The filter is selected with --filter. Without it, annotate reads the filter from
 explicit --image, --artefacts or --output paths and falls back to L. The default
-paths are output/<filter>/stack_ghost.xisf, output/<filter>/artefacts.csv and
-output/<filter>/stack_detected.xisf.
+paths are output/<filter>/<filter>_stack_ghost.xisf,
+output/<filter>/artefacts.csv and output/<filter>/<filter>_stack_detected.xisf.
+The output XISF window name is detected_<filter>.
 
 The output is a Float32 XISF image with bounds 0:1 and is compressed with zlib.`,
 		Args: cobra.NoArgs,
@@ -58,11 +57,11 @@ The output is a Float32 XISF image with bounds 0:1 and is compressed with zlib.`
 
 	flags := cmd.Flags()
 	flags.StringVarP(&opts.image, "image", "i", "",
-		"monochrome XISF master to annotate (default output/<filter>/"+stackGhostName+")")
+		"monochrome XISF master to annotate (default output/<filter>/<filter>_stack_ghost.xisf)")
 	flags.StringVarP(&opts.artefacts, "artefacts", "a", "",
 		"artefact catalogue produced by scan (default output/<filter>/"+artefactsName+")")
 	flags.StringVarP(&opts.output, "output", "o", "",
-		"RGB XISF image to write (default output/<filter>/"+stackDetectedName+")")
+		"RGB XISF image to write (default output/<filter>/<filter>_stack_detected.xisf)")
 	flags.StringVar(&opts.filter, "filter", "",
 		"filter to annotate (L, R, G, B, S, H or O; default: read from paths, otherwise L)")
 	flags.IntVar(&opts.arm, "arm", 12, "cross arm length in pixels")
@@ -165,13 +164,13 @@ func (o *annotateOptions) resolve() (string, error) {
 		return "", err
 	}
 	if o.image == "" {
-		o.image = filepath.Join("output", filter, stackGhostName)
+		o.image = filepath.Join("output", filter, stackFileName(stackGhostKind, filter))
 	}
 	if o.artefacts == "" {
 		o.artefacts = filepath.Join("output", filter, artefactsName)
 	}
 	if o.output == "" {
-		o.output = filepath.Join("output", filter, stackDetectedName)
+		o.output = filepath.Join("output", filter, stackFileName(stackDetectedKind, filter))
 	}
 	if err := o.checkPaths(); err != nil {
 		return "", err
@@ -200,7 +199,7 @@ func runAnnotate(opts *annotateOptions) error {
 	if err := os.MkdirAll(filepath.Dir(opts.output), 0o755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
-	if err := xisfwrite.WriteRGB(opts.output, "stack_detected", w, h, rgb); err != nil {
+	if err := xisfwrite.WriteRGB(opts.output, stackWindowID(stackDetectedKind, filter), w, h, rgb); err != nil {
 		return fmt.Errorf("write %s: %w", opts.output, err)
 	}
 

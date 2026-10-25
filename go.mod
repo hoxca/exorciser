@@ -3,7 +3,7 @@ module github.com/hoxca/exorciser
 go 1.22
 
 require (
-	github.com/hoxca/xisf v0.0.1
+	github.com/hoxca/xisf v0.0.2
 	github.com/spf13/cobra v1.10.2
 )
 

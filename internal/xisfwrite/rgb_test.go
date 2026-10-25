@@ -47,6 +47,13 @@ func TestWriteRGB(t *testing.T) {
 	if im.ID != "test" {
 		t.Errorf("id = %q, want test", im.ID)
 	}
+	p, ok := im.Property("PCL:OverridableIdentifier")
+	if !ok {
+		t.Fatal("image has no PCL:OverridableIdentifier property, PixInsight would rename the view")
+	}
+	if p.Type != "Boolean" || p.Value != "false" {
+		t.Errorf("PCL:OverridableIdentifier = %s:%s, want Boolean:false", p.Type, p.Value)
+	}
 	low, high, ok := im.RepresentableRange()
 	if !ok || low != 0 || high != 1 {
 		t.Errorf("representable range = %v:%v (ok=%v), want 0:1", low, high, ok)

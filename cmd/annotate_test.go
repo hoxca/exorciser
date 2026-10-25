@@ -67,9 +67,9 @@ func TestComposeDetected(t *testing.T) {
 
 func TestAnnotateOptionsValidate(t *testing.T) {
 	base := &annotateOptions{
-		image:      "output/stack_ghost.xisf",
-		artefacts:  "output/artefacts.csv",
-		output:     "output/stack_detected.xisf",
+		image:      filepath.Join("output", "L", stackFileName(stackGhostKind, "L")),
+		artefacts:  filepath.Join("output", "L", artefactsName),
+		output:     filepath.Join("output", "L", stackFileName(stackDetectedKind, "L")),
 		arm:        12,
 		thickness:  3,
 		labelScale: 3,
@@ -118,13 +118,13 @@ func TestResolveAnnotateDefaults(t *testing.T) {
 	if filter != "L" {
 		t.Errorf("filter = %q, want L", filter)
 	}
-	if want := filepath.Join("output", "L", stackGhostName); opts.image != want {
+	if want := filepath.Join("output", "L", stackFileName(stackGhostKind, "L")); opts.image != want {
 		t.Errorf("image = %q, want %q", opts.image, want)
 	}
 	if want := filepath.Join("output", "L", artefactsName); opts.artefacts != want {
 		t.Errorf("artefacts = %q, want %q", opts.artefacts, want)
 	}
-	if want := filepath.Join("output", "L", stackDetectedName); opts.output != want {
+	if want := filepath.Join("output", "L", stackFileName(stackDetectedKind, "L")); opts.output != want {
 		t.Errorf("output = %q, want %q", opts.output, want)
 	}
 }
@@ -151,14 +151,14 @@ func TestResolveAnnotateFilter(t *testing.T) {
 		{
 			name: "from image",
 			opts: annotateOptions{
-				image: filepath.Join("output", "B", stackGhostName),
+				image: filepath.Join("output", "B", stackFileName(stackGhostKind, "B")),
 			},
 			wantFilter: "B",
 		},
 		{
 			name: "conflicting paths",
 			opts: annotateOptions{
-				image:     filepath.Join("output", "L", stackGhostName),
+				image:     filepath.Join("output", "L", stackFileName(stackGhostKind, "L")),
 				artefacts: filepath.Join("output", "R", artefactsName),
 			},
 			wantErr: true,
@@ -189,9 +189,9 @@ func TestResolveAnnotateFilter(t *testing.T) {
 			if filter != tt.wantFilter {
 				t.Fatalf("filter = %q, want %q", filter, tt.wantFilter)
 			}
-			wantImage := filepath.Join("output", tt.wantFilter, stackGhostName)
+			wantImage := filepath.Join("output", tt.wantFilter, stackFileName(stackGhostKind, tt.wantFilter))
 			wantArtefacts := filepath.Join("output", tt.wantFilter, artefactsName)
-			wantOutput := filepath.Join("output", tt.wantFilter, stackDetectedName)
+			wantOutput := filepath.Join("output", tt.wantFilter, stackFileName(stackDetectedKind, tt.wantFilter))
 			if opts.image != wantImage || opts.artefacts != wantArtefacts || opts.output != wantOutput {
 				t.Errorf("resolved paths = %q, %q, %q; want %q, %q, %q",
 					opts.image, opts.artefacts, opts.output,
@@ -209,7 +209,7 @@ func TestRunAnnotate(t *testing.T) {
 		plane[i] = 0.25
 	}
 
-	image := filepath.Join(dir, "stack_ghost.xisf")
+	image := filepath.Join(dir, stackFileName(stackGhostKind, "L"))
 	writeFloatXISF(t, image, w, h, plane)
 
 	artefactsPath := filepath.Join(dir, "artefacts.csv")
@@ -225,7 +225,7 @@ func TestRunAnnotate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output := filepath.Join(dir, "stack_detected.xisf")
+	output := filepath.Join(dir, stackFileName(stackDetectedKind, "L"))
 	opts := &annotateOptions{
 		image:      image,
 		artefacts:  artefactsPath,
@@ -243,6 +243,16 @@ func TestRunAnnotate(t *testing.T) {
 		t.Fatalf("open annotated image: %v", err)
 	}
 	im := f.Images()[0]
+	if im.ID != stackWindowID(stackDetectedKind, "L") {
+		t.Errorf("id = %q, want detected_L", im.ID)
+	}
+	p, ok := im.Property(overridableIdentifier)
+	if !ok {
+		t.Fatalf("annotated image has no %s property, PixInsight would rename the view", overridableIdentifier)
+	}
+	if p.Type != "Boolean" || p.Value != "false" {
+		t.Errorf("%s = %s:%s, want Boolean:false", overridableIdentifier, p.Type, p.Value)
+	}
 	if im.Channels() != 3 || im.ColorSpace != xisf.RGB {
 		t.Errorf("image is %d channels in %v, want 3 in RGB", im.Channels(), im.ColorSpace)
 	}
