@@ -341,6 +341,40 @@ func drawCross(rgb []float32, w, h, x, y, arm, thickness int, c paint) {
 	}
 }
 
+// drawSquare draws a hollow square outline of the given size, centred on
+// (cx, cy), and clipped at the image border.
+func drawSquare(rgb []float32, w, h, cx, cy, size, thickness int, c paint) {
+	if size <= 0 || thickness < 1 {
+		return
+	}
+	n := w * h
+	half := size / 2
+	left, right := cx-half, cx+half
+	top, bottom := cy-half, cy+half
+	for y := max(0, top); y <= min(h-1, bottom); y++ {
+		if y < top+thickness || y > bottom-thickness {
+			if x0, x1, ok := clipSpan(left, right, w); ok {
+				fillColour(rgb, n, w, x0, x1, y, y, c)
+			}
+			continue
+		}
+		if x0, x1, ok := clipSpan(left, left+thickness-1, w); ok {
+			fillColour(rgb, n, w, x0, x1, y, y, c)
+		}
+		if x0, x1, ok := clipSpan(right-thickness+1, right, w); ok {
+			fillColour(rgb, n, w, x0, x1, y, y, c)
+		}
+	}
+}
+
+// clipSpan returns the part of [lo, hi] that lies inside [0, limit).
+func clipSpan(lo, hi, limit int) (int, int, bool) {
+	if hi < 0 || lo >= limit {
+		return 0, 0, false
+	}
+	return max(0, lo), min(limit-1, hi), true
+}
+
 // pixelSpan returns the part of [center+start, center+start+length) that lies
 // inside [0, limit).
 func pixelSpan(center, start, length, limit int) (lo, hi int, ok bool) {

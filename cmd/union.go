@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/hoxca/exorciser/internal/detect"
 	"github.com/hoxca/exorciser/internal/report"
 	"github.com/hoxca/exorciser/internal/union"
 	"github.com/hoxca/exorciser/internal/xisfwrite"
@@ -23,6 +24,17 @@ type unionOptions struct {
 	thickness  int
 	labelScale int
 }
+
+const (
+	// backgroundName is the file recording the chosen sky window.
+	backgroundName = "background.csv"
+	// backgroundSize is the side of the background window. It is odd so the
+	// window has a centre pixel.
+	backgroundSize = 65
+	// backgroundOrder is the filter preference for the clean master that
+	// supplies the background window.
+	backgroundOrder = "LRH"
+)
 
 func newUnionCmd() *cobra.Command {
 	opts := &unionOptions{}
@@ -54,7 +66,20 @@ catalogue, and the result is written to
 detected_<filter>. The existing red annotations are preserved, so a yellow mark
 is an artefact another filter saw but this one did not.
 
-Run scan and annotate for every filter before union.`,
+union also picks a background sky window from the clean master of the first
+filter in L, R, H order. The 65x65 window lies inside the image and clear of
+every union artefact by three ghost sigmas. Stars are masked and the remaining
+pixels are sigma-clipped; a window is only used when at least 75% of its pixels
+survive and each of its four quadrants keeps at least 25%, so the statistics
+rest on a representative sample. The winner is the most uniform window, judged
+by the spread of its quadrant means, with closeness to the frame's typical sky
+level as a tie-breaker. This rejects nebulosity even when it matches the median
+level. The centre and its background statistics are written to
+<output>/<filters>/background.csv, and the window is outlined in yellow on
+every <filter>_stack_detected.xisf.
+
+Run scan and annotate for every filter before union. At least one of L, R or H
+must have a clean master.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := opts.validate(); err != nil {
@@ -125,6 +150,25 @@ func runUnion(ctx context.Context, opts *unionOptions) error {
 		"path", unionPath,
 		"artefacts", len(merged))
 
+	background, bgWidth, bgHeight, err := findBackground(opts.output, filters, merged)
+	if err != nil {
+		return err
+	}
+	backgroundPath := filepath.Join(outDir, backgroundName)
+	if err := writeBackgroundFile(backgroundPath, background); err != nil {
+		return err
+	}
+	slog.Info("background window written",
+		"path", backgroundPath,
+		"filter", background.Filter,
+		"x", background.X,
+		"y", background.Y,
+		"size", background.Size,
+		"mean", background.Mean,
+		"noise", background.Noise,
+		"snr", background.SNR,
+		"pixels", background.Pixels)
+
 	width, height := 0, 0
 	for _, f := range filters {
 		if err := ctx.Err(); err != nil {
@@ -136,6 +180,10 @@ func runUnion(ctx context.Context, opts *unionOptions) error {
 		rgb, w, h, err := readRGBImage(source)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", source, err)
+		}
+		if w != bgWidth || h != bgHeight {
+			return fmt.Errorf("%s is %d×%d but the clean master is %d×%d; background positions need a common frame",
+				source, w, h, bgWidth, bgHeight)
 		}
 		if width == 0 {
 			width, height = w, h
@@ -150,6 +198,7 @@ func runUnion(ctx context.Context, opts *unionOptions) error {
 		for _, m := range missing {
 			drawNumber(rgb, w, h, m.N, m.X, m.Y, opts.arm, opts.labelScale, paintYellow)
 		}
+		drawSquare(rgb, w, h, background.X, background.Y, background.Size, opts.thickness, paintYellow)
 
 		dest := filepath.Join(outDir, stackFileName(stackDetectedKind, f.Name))
 		if err := xisfwrite.WriteRGB(dest, stackWindowID(stackDetectedKind, f.Name), w, h, rgb); err != nil {
@@ -162,6 +211,61 @@ func runUnion(ctx context.Context, opts *unionOptions) error {
 			"missing", len(missing))
 	}
 	return nil
+}
+
+// findBackground reads the clean master of the first filter in L, R, H order
+// and chooses a sky window free of union artefacts. It returns the record and
+// the frame dimensions the union images must share.
+func findBackground(root string, filters []union.Filter, artefacts []report.Artefact) (report.Background, int, int, error) {
+	name, path, err := backgroundSource(root, filters)
+	if err != nil {
+		return report.Background{}, 0, 0, err
+	}
+	plane, w, h, err := readMonoImage(path)
+	if err != nil {
+		return report.Background{}, 0, 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	mask, err := detect.StarMask(plane, w, h, detect.StarMaskOptions{})
+	if err != nil {
+		return report.Background{}, 0, 0, fmt.Errorf("build star mask for %s: %w", path, err)
+	}
+	window, err := union.FindBackground(plane, w, h, artefacts, mask, backgroundSize)
+	if err != nil {
+		return report.Background{}, 0, 0, fmt.Errorf("find background in %s: %w", path, err)
+	}
+	return report.Background{
+		Filter: name,
+		X:      window.X,
+		Y:      window.Y,
+		Size:   window.Size,
+		Mean:   window.Mean,
+		Noise:  window.Noise,
+		SNR:    window.SNR,
+		Pixels: window.Pixels,
+	}, w, h, nil
+}
+
+// backgroundSource returns the preferred filter and its clean master path.
+func backgroundSource(root string, filters []union.Filter) (string, string, error) {
+	for i := 0; i < len(backgroundOrder); i++ {
+		name := string(backgroundOrder[i])
+		for _, f := range filters {
+			if f.Name != name {
+				continue
+			}
+			path := filepath.Join(root, name, stackFileName(stackCleanKind, name))
+			if _, err := os.Stat(path); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					break
+				}
+				return "", "", fmt.Errorf("stat %s: %w", path, err)
+			}
+			return name, path, nil
+		}
+	}
+	return "", "", fmt.Errorf(
+		"none of the filters %s has a clean master below %s; run scan for one of them first",
+		strings.Join(strings.Split(backgroundOrder, ""), ", "), root)
 }
 
 // readUnionFilters loads the catalogue of every single-letter filter directory
@@ -202,6 +306,22 @@ func writeUnionArtefacts(path string, artefacts []report.Artefact) error {
 		return fmt.Errorf("create %s: %w", path, err)
 	}
 	if err := report.WriteArtefacts(f, artefacts); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeBackgroundFile writes the single background record.
+func writeBackgroundFile(path string, background report.Background) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	if err := report.WriteBackground(f, background); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("write %s: %w", path, err)
 	}
