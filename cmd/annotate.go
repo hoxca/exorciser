@@ -226,6 +226,36 @@ func readArtefactsFile(path string) ([]report.Artefact, error) {
 	return artefacts, nil
 }
 
+// readRGBImage reads a three-channel image into the channel-planar layout used
+// by xisfwrite.WriteRGB: the first w*h samples are red, then green, then blue.
+func readRGBImage(path string) ([]float32, int, int, error) {
+	f, err := xisf.Open(path)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("open image: %w", err)
+	}
+	images := f.Images()
+	if len(images) == 0 {
+		return nil, 0, 0, errors.New("image contains no images")
+	}
+	im := images[0]
+	if im.Channels() != 3 {
+		return nil, 0, 0, fmt.Errorf("image has %d channels, want 3", im.Channels())
+	}
+	wide, err := im.Float64()
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("read image pixels: %w", err)
+	}
+	w, h := im.Width(), im.Height()
+	if len(wide) != 3*w*h {
+		return nil, 0, 0, fmt.Errorf("image has %d samples, want %d", len(wide), 3*w*h)
+	}
+	rgb := make([]float32, len(wide))
+	for i, v := range wide {
+		rgb[i] = float32(v)
+	}
+	return rgb, w, h, nil
+}
+
 func readMonoImage(path string) ([]float32, int, int, error) {
 	f, err := xisf.Open(path)
 	if err != nil {
@@ -249,6 +279,16 @@ func readMonoImage(path string) ([]float32, int, int, error) {
 	}
 	return plane, w, h, nil
 }
+
+// paint is an RGB colour used by the annotation overlays.
+type paint struct{ r, g, b float32 }
+
+var (
+	// paintRed marks artefacts catalogued in this filter.
+	paintRed = paint{1, 0, 0}
+	// paintYellow marks union artefacts missing from this filter.
+	paintYellow = paint{1, 1, 0}
+)
 
 // composeDetected copies plane into all three RGB channels, draws a red cross
 // at every artefact position and prints its catalogue number beside the cross.
@@ -275,15 +315,15 @@ func composeDetected(plane []float32, w, h int, artefacts []report.Artefact, arm
 	copy(rgb[n:2*n], plane[:n])
 	copy(rgb[2*n:], plane[:n])
 	for _, a := range artefacts {
-		drawCross(rgb, w, h, a.X, a.Y, arm, thickness)
+		drawCross(rgb, w, h, a.X, a.Y, arm, thickness, paintRed)
 	}
 	for _, a := range artefacts {
-		drawNumber(rgb, w, h, a.N, a.X, a.Y, arm, labelScale)
+		drawNumber(rgb, w, h, a.N, a.X, a.Y, arm, labelScale, paintRed)
 	}
 	return rgb, nil
 }
 
-func drawCross(rgb []float32, w, h, x, y, arm, thickness int) {
+func drawCross(rgb []float32, w, h, x, y, arm, thickness int, c paint) {
 	n := w * h
 	barOffset := -(thickness / 2)
 	barLength := thickness
@@ -291,12 +331,12 @@ func drawCross(rgb []float32, w, h, x, y, arm, thickness int) {
 
 	if x0, x1, ok := pixelSpan(x, -arm, armLength, w); ok {
 		if y0, y1, ok := pixelSpan(y, barOffset, barLength, h); ok {
-			fillRed(rgb, n, w, x0, x1, y0, y1)
+			fillColour(rgb, n, w, x0, x1, y0, y1, c)
 		}
 	}
 	if x0, x1, ok := pixelSpan(x, barOffset, barLength, w); ok {
 		if y0, y1, ok := pixelSpan(y, -arm, armLength, h); ok {
-			fillRed(rgb, n, w, x0, x1, y0, y1)
+			fillColour(rgb, n, w, x0, x1, y0, y1, c)
 		}
 	}
 }
@@ -318,14 +358,14 @@ func pixelSpan(center, start, length, limit int) (lo, hi int, ok bool) {
 	return lo, hi, true
 }
 
-func fillRed(rgb []float32, planeSize, w, x0, x1, y0, y1 int) {
+func fillColour(rgb []float32, planeSize, w, x0, x1, y0, y1 int, c paint) {
 	for y := y0; y <= y1; y++ {
 		row := y * w
 		for x := x0; x <= x1; x++ {
 			i := row + x
-			rgb[i] = 1
-			rgb[planeSize+i] = 0
-			rgb[2*planeSize+i] = 0
+			rgb[i] = c.r
+			rgb[planeSize+i] = c.g
+			rgb[2*planeSize+i] = c.b
 		}
 	}
 }

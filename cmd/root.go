@@ -48,6 +48,9 @@ them, and catalogues every diffuse artefact in the difference.
 annotate draws the catalogue on an RGB copy of the ghost master, with a red
 cross at every artefact position.
 
+union merges the per-filter catalogues, averaging each artefact's jittered
+position, and marks in yellow the union entries a filter is missing.
+
 Frames are analysed after star alignment, so positions are in registered pixels
 and move with each frame's alignment offset.`,
 		Version:       fmt.Sprintf("%s (built %s)", Version, BuildDate),
@@ -63,6 +66,7 @@ and move with each frame's alignment offset.`,
 	root.AddCommand(newDetectCmd())
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newAnnotateCmd())
+	root.AddCommand(newUnionCmd())
 	return root
 }
 

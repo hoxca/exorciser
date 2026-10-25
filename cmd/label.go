@@ -124,13 +124,13 @@ func glyphFor(ch byte) ([glyphHeight]string, bool) {
 
 // drawNumber prints number beside the cross at (cx, cy). Labels are drawn to
 // the right when they fit and to the left otherwise, then clamped to the image.
-func drawNumber(rgb []float32, w, h, number, cx, cy, arm, scale int) {
+func drawNumber(rgb []float32, w, h, number, cx, cy, arm, scale int, c paint) {
 	if scale <= 0 {
 		return
 	}
 	text := strconv.Itoa(number)
 	x, y := labelOrigin(text, cx, cy, arm, scale, w, h)
-	drawDigits(rgb, w, h, text, x, y, scale)
+	drawDigits(rgb, w, h, text, x, y, scale, c)
 }
 
 func labelWidth(text string, scale int) int {
@@ -170,7 +170,7 @@ func labelOrigin(text string, cx, cy, arm, scale, w, h int) (int, int) {
 	return x, y
 }
 
-func drawDigits(rgb []float32, w, h int, text string, x0, y0, scale int) {
+func drawDigits(rgb []float32, w, h int, text string, x0, y0, scale int, c paint) {
 	if scale <= 0 {
 		return
 	}
@@ -190,7 +190,7 @@ func drawDigits(rgb []float32, w, h int, text string, x0, y0, scale int) {
 				px0, px1, okX := pixelSpan(gx0+gx*scale, 0, scale, w)
 				py0, py1, okY := pixelSpan(y0+gy*scale, 0, scale, h)
 				if okX && okY {
-					fillRed(rgb, planeSize, w, px0, px1, py0, py1)
+					fillColour(rgb, planeSize, w, px0, px1, py0, py1, c)
 				}
 			}
 		}

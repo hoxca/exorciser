@@ -61,7 +61,7 @@ func TestLabelOrigin(t *testing.T) {
 func TestDrawNumber(t *testing.T) {
 	const w, h = 100, 100
 	rgb := make([]float32, 3*w*h)
-	drawNumber(rgb, w, h, 42, 50, 50, 5, 2)
+	drawNumber(rgb, w, h, 42, 50, 50, 5, 2, paintRed)
 
 	n := w * h
 	red := 0
@@ -79,7 +79,7 @@ func TestDrawNumber(t *testing.T) {
 func TestDrawNumberZeroScale(t *testing.T) {
 	const w, h = 32, 32
 	rgb := make([]float32, 3*w*h)
-	drawNumber(rgb, w, h, 1, 16, 16, 4, 0)
+	drawNumber(rgb, w, h, 1, 16, 16, 4, 0, paintRed)
 	for i, v := range rgb {
 		if v != 0 {
 			t.Fatalf("sample %d = %v, want an empty image", i, v)
