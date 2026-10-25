@@ -35,6 +35,7 @@ func TestScanRejectsBadFlags(t *testing.T) {
 		{name: "clean margin nan", args: []string{"--clean-margin=NaN"}},
 		{name: "polarity", args: []string{"--polarity", "bright"}},
 		{name: "margin", args: []string{"--margin", "-1"}},
+		{name: "corner", args: []string{"--corner", "-1"}},
 		{name: "star sigma", args: []string{"--star-sigma", "0"}},
 		{name: "star dilation", args: []string{"--star-dilation", "-1"}},
 		{name: "star halo", args: []string{"--star-halo", "-1"}},
@@ -286,6 +287,9 @@ const (
 
 	scanGhostX = 170
 	scanGhostY = 140
+
+	scanCornerX = 30
+	scanCornerY = 30
 )
 
 func TestRunScanEndToEnd(t *testing.T) {
@@ -342,6 +346,7 @@ func TestRunScanEndToEnd(t *testing.T) {
 		polarity:     detect.PolarityPositive,
 		scales:       []float64{4, 8, 16},
 		margin:       16,
+		corner:       80,
 		starSigma:    50,
 		starDilation: 4,
 		starHalo:     0,
@@ -382,6 +387,9 @@ func TestRunScanEndToEnd(t *testing.T) {
 		}
 		if math.Hypot(float64(a.X-scanStarX), float64(a.Y-scanStarY)) < 8 {
 			t.Errorf("star leaked into the catalogue: %+v", a)
+		}
+		if a.X < opts.corner && a.Y < opts.corner {
+			t.Errorf("corner artefact leaked into the catalogue: %+v", a)
 		}
 	}
 	if !found {
@@ -424,6 +432,9 @@ func makeScanFrame(seed int64, starAmp, ghostAmp float64) []float32 {
 			v += starAmp * gaussianAt(x, y, scanStarX, scanStarY, 1.5)
 			if ghostAmp != 0 {
 				v += ghostAmp * gaussianAt(x, y, scanGhostX, scanGhostY, 6)
+				// A static feature in the top-left corner. The scan must drop
+				// it from the catalogue instead of reporting it as a ghost.
+				v += ghostAmp * gaussianAt(x, y, scanCornerX, scanCornerY, 6)
 			}
 			plane[y*scanW+x] = float32(v)
 		}

@@ -57,6 +57,7 @@ type scanOptions struct {
 	polarity        detect.Polarity
 	scales          []float64
 	margin          int
+	corner          int
 	starSigma       float64
 	starDilation    int
 	starHalo        int
@@ -112,7 +113,8 @@ because a big star's halo can be much wider than a small star's. Set
 --star-halo=0 to disable this rejection. The mask and the star components are
 built from the clean master, so the ghost is absent and survives. The outer
 --margin pixels are excluded because registration leaves them poorly
-constrained.
+constrained. For the same reason a --corner square at each image corner is
+dropped from the catalogue; set --corner=0 to keep it.
 
 Frames are analysed after star alignment, so positions are in registered pixels
 and a ghost that is equally present in both groups cancels. A ghost that moves
@@ -153,6 +155,9 @@ and use a decimal comma.`,
 			}
 			if opts.margin < 0 {
 				return fmt.Errorf("--margin must not be negative, got %d", opts.margin)
+			}
+			if opts.corner < 0 {
+				return fmt.Errorf("--corner must not be negative, got %d", opts.corner)
 			}
 			if opts.starSigma <= 0 || math.IsNaN(opts.starSigma) || math.IsInf(opts.starSigma, 0) {
 				return fmt.Errorf("--star-sigma must be a positive number, got %v", opts.starSigma)
@@ -226,6 +231,8 @@ and use a decimal comma.`,
 		"matched-filter scales in pixels, comma separated")
 	flags.IntVar(&opts.margin, "margin", 64,
 		"border excluded from the scan, in pixels")
+	flags.IntVar(&opts.corner, "corner", 80,
+		"square ignored at each image corner, in pixels; 0 disables corner rejection")
 	flags.Float64Var(&opts.starSigma, "star-sigma", 50,
 		"star-mask threshold in local-mean noise sigmas")
 	flags.IntVar(&opts.starDilation, "star-dilation", 4,
@@ -305,6 +312,10 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	ref, w, h, err := loadPlane(cleanPaths[0])
 	if err != nil {
 		return fmt.Errorf("load reference %s: %w", filepath.Base(cleanPaths[0]), err)
+	}
+	if opts.corner > 0 && 2*opts.corner >= min(w, h) {
+		return fmt.Errorf("--corner %d leaves no scan area in a %d×%d image",
+			opts.corner, w, h)
 	}
 	slog.Debug("normalization reference", "file", filepath.Base(cleanPaths[0]))
 
@@ -427,6 +438,14 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 	})
 	if err != nil {
 		return fmt.Errorf("scan difference: %w", err)
+	}
+	if opts.corner > 0 {
+		var rejected int
+		found, rejected = detect.RejectCorners(found, w, h, opts.corner)
+		slog.Info("corner candidates rejected",
+			"rejected", rejected,
+			"remaining", len(found),
+			"size", opts.corner)
 	}
 	if opts.starHalo > 0 {
 		var rejected int
