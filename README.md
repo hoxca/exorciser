@@ -10,7 +10,7 @@ The result is a list of positions and a set of annotated images you can open in
 PixInsight.
 
 ```
-detect  ->  scan  ->  annotate  ->  union
+detect  ->  scan  ->  annotate  ->  union  ->  erase
 ```
 
 ## Installation
@@ -80,7 +80,8 @@ touched.
 | `detect` | once per filter | Measures the chosen artefact in every frame and marks each frame as containing it or not. |
 | `scan` | once per filter | Stacks the two groups of frames, subtracts them, and finds every artefact in the difference. |
 | `annotate` | once per filter | Draws the catalogue on the stacked image so you can see it in PixInsight. |
-| `union` | once, after all filters | Combines the catalogues and marks, in yellow, what each filter missed. |
+| `union` | once, after all filters | Combines the catalogues, marks in yellow what each filter missed, and samples the background sky. |
+| `erase` | once per filter | Removes the catalogued artefacts from the frames that show them and writes repaired copies. |
 
 The commands can be typed one at a time, or run from the example scripts in
 `output/cmd/`. The scripts contain the exact commands used for the L, R, G and
@@ -223,12 +224,57 @@ averaged as well.
 It writes:
 
 - `output/LRGB/artefacts.csv` - the merged catalogue across filters.
+- `output/LRGB/background.csv` - the centre and statistics of a background sky
+  window (see below).
 - `output/LRGB/<filter>_stack_detected.xisf` - a copy of each filter's
   annotated image with **yellow** crosses added.
 
 A yellow cross and its number mark a union artefact that this filter did not
 detect but another filter did. Red crosses are the artefacts the filter found
 itself. The yellow numbers are the numbers from `output/LRGB/artefacts.csv`.
+
+### The background window
+
+`union` also chooses a patch of empty sky to represent the background. It uses
+the clean master (`<filter>_stack_clean.xisf`) of the first available filter in
+the order **L, R, H**, because a luminance frame usually has the best
+signal-to-noise.
+
+The patch is a 65x65 square. 65 is odd on purpose: the window then has a true
+centre pixel, at `x-32 ... x+32`. The whole square lies inside the image, and
+it must stay clear of every artefact in the union catalogue by three times that
+artefact's size, so a ghost's edge cannot leak into the sample.
+
+Stars inside the window are removed before anything is measured. A star mask is
+built from the clean master, then the remaining pixels are sigma-clipped to
+remove faint stars and cosmic rays the mask missed. A window is only accepted
+when at least 75% of its pixels survive and each of its four corner quadrants
+keeps at least 25%. A background sample may contain a few stars, but most of
+the window must still contribute to the statistics.
+
+Uniformity decides the winner. The window is divided into four 32x32 corner
+quadrants, and the spread between their average levels is measured in units of
+the frame's noise. The flattest patch wins. Its average level only acts as a
+tie-breaker, with a small weight, so a uniform patch is preferred to a brighter
+or darker one. This is what keeps the sample out of nebulosity: a nebula raises
+the quadrant spread even when its average brightness happens to equal the
+frame's median, which is exactly how the old level-only rule went wrong.
+
+The centre, the statistics of the surviving pixels and their count are written
+to `output/LRGB/background.csv`:
+
+```
+filter;x;y;size;mean;noise;snr;pixels
+L;3456;1056;65;0,009465610751035629;0,00011199150197167373;84,521;3769
+```
+
+`x;y` is the centre in registered pixels, `mean` the sky level, `noise` its
+standard deviation, `snr` their ratio (`mean / noise`), and `pixels` how many
+samples survived the mask and clipping out of the 4225 in the window.
+
+The same square is outlined in yellow on every `<filter>_stack_detected.xisf`
+written by `union`, so you can see exactly which part of the image supplied the
+background value.
 
 Options:
 
@@ -237,6 +283,55 @@ Options:
 | `-o`, `--output` | Root directory holding the filter directories. Defaults to `output`. |
 | `--tolerance` | Maximum distance in pixels for two positions to be considered the same artefact. Raise it if a filter's copy appears in yellow by mistake. |
 | `--arm`, `--thickness`, `--label-scale` | Same meaning as in `annotate`, for the yellow markers. |
+
+## Step 5 - erase
+
+`erase` removes the catalogued artefacts from the frames themselves. It reads
+the union catalogue, so every artefact found by any filter is removed, not
+only the ones the current filter detected itself.
+
+```
+./bin/exorciser erase --filter L
+```
+
+A frame is only modified when `output/<filter>/detection.csv` marks it
+`detected;true`. Clean frames are copied unchanged, so the output directory
+always contains every input frame with its original file name. Frames missing
+from the report are also copied unchanged, with a warning.
+
+The repair uses three files written earlier:
+
+- the union catalogue, default `output/LRGB/artefacts.csv`;
+- the background window, default `output/LRGB/background.csv`;
+- the reference master, default `output/L/L_stack_clean.xisf` (that is,
+  `output/<filter>/<filter>_stack_clean.xisf`).
+
+For each artefact, a disc of 32 pixels around its centre is replaced by the
+matching part of the clean master. The clean pixels are moved onto the frame's
+own sky level, and Gaussian noise is added to bring the patch up to the frame's
+noise. Both values are measured in the 65x65 background window, so the repair
+matches the frame rather than the cleaner reference. A 6-pixel feather blends
+the patch into the surroundings, and the noise is seeded from the frame name
+and artefact number, so repeated runs give the same result.
+
+The repaired frames are written to `output/registered/<filter>/`. The input
+frames are never modified.
+
+Main options:
+
+| Option | Meaning |
+| --- | --- |
+| `-i` | Directory holding the frames, default `img/registered`. |
+| `-o` | Output root, default `output/registered`. |
+| `--filter` | Filter to repair. |
+| `--products` | Directory holding the scan, annotate and union results, default `output`. |
+| `--artefacts` | Union catalogue to use, when it is not the default. |
+| `--background` | Background window record, when it is not the default. |
+| `--clean` | Clean master to use as reference. |
+| `--detection` | Detection report deciding which frames are modified. |
+| `--radius` | Radius of the repaired disc, default 32 pixels. |
+| `--feather` | Blend width inside the rim, default 6 pixels. |
+| `-j` | Number of frames processed at once, default 4. |
 
 ## Running every filter
 
@@ -256,6 +351,17 @@ Then run:
 ```
 ./bin/exorciser union
 ```
+
+Finally, repair each filter:
+
+```
+./bin/exorciser erase --filter L
+./bin/exorciser erase --filter R
+./bin/exorciser erase --filter G
+./bin/exorciser erase --filter B
+```
+
+Repaired frames land in `output/registered/<filter>/`.
 
 `output/cmd/L.sh`, `R.sh`, `G.sh` and `B.sh` run one filter each. The scripts
 assume you are in the project directory and that the program is at
@@ -282,7 +388,9 @@ a few pixels of the one for B, but measure it in each filter.
 | `output/<filter>/<filter>_stack_ghost.xisf` | Stack of the frames containing the artefact. |
 | `output/<filter>/<filter>_stack_detected.xisf` | Colour ghost stack with red annotations. |
 | `output/<LRGBSHO...>/artefacts.csv` | Merged catalogue from `union`. |
-| `output/<LRGBSHO...>/<filter>_stack_detected.xisf` | Annotated image with yellow markers for missing artefacts. |
+| `output/<LRGBSHO...>/background.csv` | Centre and sky statistics of the background window. |
+| `output/<LRGBSHO...>/<filter>_stack_detected.xisf` | Annotated image with yellow markers for missing artefacts and the background square. |
+| `output/registered/<filter>/<name>.xisf` | Repaired frames written by `erase`; clean frames are unchanged copies. |
 
 Both CSV files use a semicolon as separator and a comma as decimal separator,
 so they open directly in a spreadsheet with the right numbers.
@@ -318,10 +426,12 @@ the annotated image and, if needed, on the raw frames.
 
 ### Annotated images
 
-Red means "found in this filter". Yellow, in the union directory only, means
-"found in another filter but not in this one". A yellow marker may also mean
-that the artefact was present but too faint to pass `--min-snr`, or that it
-fell inside the excluded border or a star halo.
+Red means "found in this filter". A yellow cross, in the union directory only,
+means "found in another filter but not in this one". A yellow marker may also
+mean that the artefact was present but too faint to pass `--min-snr`, or that
+it fell inside the excluded border or a star halo. A hollow yellow square is
+the background sky window, not an artefact: it marks the region whose sky level
+and noise are recorded in `background.csv`.
 
 ## Options worth changing
 
@@ -387,6 +497,25 @@ subtraction. Choose another reference.
 Positions differ by more than the tolerance between filters. Raise
 `--tolerance` in `union`.
 
+**"none of the filters L, R, H has a clean master"**
+`union` needs `L_stack_clean.xisf`, `R_stack_clean.xisf` or
+`H_stack_clean.xisf` to choose the background window. Run `scan` for one of
+those filters first.
+
+**"no window of sky is free of artefacts with enough surviving pixels"**
+No 65x65 patch is both clear of the catalogue and mostly star-free. Review the
+catalogue for false positives, or use a filter with fewer artefacts and fewer
+stars as the background source.
+
+**"union needs at least two filter catalogues ... found 1"**
+`erase` derives the union directory from the filter folders under `--products`.
+Run `scan` for at least two filters and then `union`, or pass `--artefacts`
+explicitly.
+
+**`erase` copied a frame instead of repairing it**
+The frame is not marked `detected;true` in `output/<filter>/detection.csv`, or
+it is missing from that report. Both are reported in the log.
+
 **A known artefact is missing from one filter**
 It may be below that filter's threshold, or inside the excluded border or a
 star halo. Try a lower `--min-snr` and a smaller `--star-halo` for that filter,
@@ -410,7 +539,10 @@ several sizes, and each significant peak is reported once, strongest first.
 
 `annotate` converts the ghost master to RGB and draws the catalogue. `union`
 matches catalogues across filters by position, averages the slightly different
-coordinates, and adds the yellow markers.
+coordinates, and adds the yellow markers. `erase` copies the corresponding
+ghost-free patch from the clean master into each frame, shifts it to the
+frame's sky level and adds matched noise, so the repaired area has the same
+brightness and grain as its surroundings.
 
 ## Known limitations
 

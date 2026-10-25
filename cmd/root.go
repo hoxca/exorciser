@@ -51,6 +51,9 @@ cross at every artefact position.
 union merges the per-filter catalogues, averaging each artefact's jittered
 position, and marks in yellow the union entries a filter is missing.
 
+erase inpaints the catalogued artefacts in the frames that show them, using the
+clean master as reference and preserving each frame's sky level and noise.
+
 Frames are analysed after star alignment, so positions are in registered pixels
 and move with each frame's alignment offset.`,
 		Version:       fmt.Sprintf("%s (built %s)", Version, BuildDate),
@@ -67,6 +70,7 @@ and move with each frame's alignment offset.`,
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newAnnotateCmd())
 	root.AddCommand(newUnionCmd())
+	root.AddCommand(newEraseCmd())
 	return root
 }
 
