@@ -317,6 +317,16 @@ and artefact number, so repeated runs give the same result.
 The repaired frames are written to `output/registered/<filter>/`. The input
 frames are never modified.
 
+**Warning: passing clouds break the repair.** Inpainting assumes the sky
+background is stable between the frame and the clean master. A passing cloud
+changes the background level and, more importantly, puts a gradient across the
+frame. The 65x65 background window no longer represents the sky under the
+artefact, so the clean patch is placed at the wrong local level and a faint
+circular mark remains. This is a limitation of the method, not of the
+catalogue: `detected;true` only reports the supervised artefact, so nothing in
+the pipeline screens frames for cloud. Inspect repaired frames before using
+them, and exclude cloudy frames from the erase input.
+
 Main options:
 
 | Option | Meaning |
@@ -516,6 +526,10 @@ explicitly.
 The frame is not marked `detected;true` in `output/<filter>/detection.csv`, or
 it is missing from that report. Both are reported in the log.
 
+**A round mark appears where an artefact was repaired**
+The frame has passing cloud or a steep background gradient, so the clean patch
+sits at the wrong local level. Exclude the frame and run `erase` again.
+
 **A known artefact is missing from one filter**
 It may be below that filter's threshold, or inside the excluded border or a
 star halo. Try a lower `--min-snr` and a smaller `--star-halo` for that filter,
@@ -554,3 +568,5 @@ brightness and grain as its surroundings.
 - Positions are in registered pixels. If you restack or re-register the
   frames, previously measured coordinates move.
 - One filter is processed per run. `union` combines the results afterwards.
+- Inpainting cannot compensate for passing cloud or a strong sky gradient. The
+  repair leaves a visible round mark on such frames.

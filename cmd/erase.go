@@ -67,6 +67,9 @@ frame's noise, both measured in the background window. A --feather pixel blend
 inside the rim hides the transition. The added noise is seeded from the frame
 name and artefact number, so the result is reproducible.
 
+Passing clouds invalidate the background sample: the resulting gradient leaves
+a visible disc.
+
 Output defaults to output/registered/<filter>/.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
