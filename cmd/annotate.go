@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/hoxca/exorciser/internal/report"
-	"github.com/hoxca/exorciser/internal/xisfwrite"
 	"github.com/hoxca/xisf"
 	"github.com/spf13/cobra"
 )
@@ -199,7 +198,7 @@ func runAnnotate(opts *annotateOptions) error {
 	if err := os.MkdirAll(filepath.Dir(opts.output), 0o755); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
-	if err := xisfwrite.WriteRGB(opts.output, stackWindowID(stackDetectedKind, filter), w, h, rgb); err != nil {
+	if err := writeRGBImage(opts.output, stackWindowID(stackDetectedKind, filter), w, h, rgb); err != nil {
 		return fmt.Errorf("write %s: %w", opts.output, err)
 	}
 
@@ -227,7 +226,7 @@ func readArtefactsFile(path string) ([]report.Artefact, error) {
 }
 
 // readRGBImage reads a three-channel image into the channel-planar layout used
-// by xisfwrite.WriteRGB: the first w*h samples are red, then green, then blue.
+// by writeRGBImage: the first w*h samples are red, then green, then blue.
 func readRGBImage(path string) ([]float32, int, int, error) {
 	f, err := xisf.Open(path)
 	if err != nil {

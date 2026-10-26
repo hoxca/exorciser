@@ -1,14 +1,13 @@
-package xisfwrite_test
+package cmd
 
 import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hoxca/exorciser/internal/xisfwrite"
 	"github.com/hoxca/xisf"
 )
 
-func TestWriteRGB(t *testing.T) {
+func TestWriteRGBImage(t *testing.T) {
 	const w, h = 4, 3
 	pixels := make([]float32, 3*w*h)
 	for i := range pixels {
@@ -16,8 +15,8 @@ func TestWriteRGB(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "rgb.xisf")
-	if err := xisfwrite.WriteRGB(path, "test", w, h, pixels); err != nil {
-		t.Fatalf("WriteRGB: %v", err)
+	if err := writeRGBImage(path, "test", w, h, pixels); err != nil {
+		t.Fatalf("writeRGBImage: %v", err)
 	}
 
 	f, err := xisf.Open(path)
@@ -47,6 +46,9 @@ func TestWriteRGB(t *testing.T) {
 	if im.ID != "test" {
 		t.Errorf("id = %q, want test", im.ID)
 	}
+	if im.ImageType != "MasterLight" {
+		t.Errorf("image type = %q, want MasterLight", im.ImageType)
+	}
 	p, ok := im.Property("PCL:OverridableIdentifier")
 	if !ok {
 		t.Fatal("image has no PCL:OverridableIdentifier property, PixInsight would rename the view")
@@ -72,9 +74,9 @@ func TestWriteRGB(t *testing.T) {
 	}
 }
 
-func TestWriteRGBRejectsWrongSize(t *testing.T) {
+func TestWriteRGBImageRejectsWrongSize(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rgb.xisf")
-	if err := xisfwrite.WriteRGB(path, "test", 4, 3, make([]float32, 10)); err == nil {
-		t.Fatal("WriteRGB accepted a short pixel buffer")
+	if err := writeRGBImage(path, "test", 4, 3, make([]float32, 10)); err == nil {
+		t.Fatal("writeRGBImage accepted a short pixel buffer")
 	}
 }

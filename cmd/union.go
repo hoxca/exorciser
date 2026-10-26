@@ -13,7 +13,6 @@ import (
 	"github.com/hoxca/exorciser/internal/detect"
 	"github.com/hoxca/exorciser/internal/report"
 	"github.com/hoxca/exorciser/internal/union"
-	"github.com/hoxca/exorciser/internal/xisfwrite"
 	"github.com/spf13/cobra"
 )
 
@@ -201,7 +200,7 @@ func runUnion(ctx context.Context, opts *unionOptions) error {
 		drawSquare(rgb, w, h, background.X, background.Y, background.Size, opts.thickness, paintYellow)
 
 		dest := filepath.Join(outDir, stackFileName(stackDetectedKind, f.Name))
-		if err := xisfwrite.WriteRGB(dest, stackWindowID(stackDetectedKind, f.Name), w, h, rgb); err != nil {
+		if err := writeRGBImage(dest, stackWindowID(stackDetectedKind, f.Name), w, h, rgb); err != nil {
 			return fmt.Errorf("write %s: %w", dest, err)
 		}
 		slog.Info("filter image updated",

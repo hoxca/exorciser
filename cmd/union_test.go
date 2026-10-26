@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/hoxca/exorciser/internal/report"
-	"github.com/hoxca/exorciser/internal/xisfwrite"
+
 	"github.com/hoxca/xisf"
 )
 
@@ -298,8 +298,8 @@ func writeUnionDetected(t *testing.T, root, filter string, w, h int, artefacts [
 		t.Fatalf("composeDetected: %v", err)
 	}
 	path := filepath.Join(root, filter, stackFileName(stackDetectedKind, filter))
-	if err := xisfwrite.WriteRGB(path, stackWindowID(stackDetectedKind, filter), w, h, rgb); err != nil {
-		t.Fatalf("WriteRGB: %v", err)
+	if err := writeRGBImage(path, stackWindowID(stackDetectedKind, filter), w, h, rgb); err != nil {
+		t.Fatalf("writeRGBImage: %v", err)
 	}
 }
 
