@@ -26,6 +26,7 @@ func TestEraseRejectsBadFlags(t *testing.T) {
 		{name: "workers", args: []string{"--workers", "0"}},
 		{name: "output", args: []string{"-o", " "}},
 		{name: "products", args: []string{"--products", " "}},
+		{name: "inplace with output", args: []string{"--inplace", "-o", "out"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -153,6 +154,125 @@ func TestRunErase(t *testing.T) {
 	}
 	if got := f.Images()[0].ID; got != "test" {
 		t.Errorf("window name = %q, want test", got)
+	}
+}
+
+func TestRunEraseInPlace(t *testing.T) {
+	const w, h = 128, 128
+	const (
+		artX, artY   = 64, 64
+		starX, starY = 60, 60
+	)
+
+	root := t.TempDir()
+	products := filepath.Join(root, "products")
+	input := filepath.Join(root, "registered",
+		"Light_BIN-1_128x128_EXPOSURE-600.00s_FILTER-L_mono")
+	if err := os.MkdirAll(input, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	catalogue := []report.Artefact{{N: 1, X: artX, Y: artY, SNR: 10, Scale: 8}}
+	for _, filter := range []string{"L", "R"} {
+		writeUnionCatalogue(t, products, filter, catalogue)
+	}
+	writeUnionCatalogue(t, products, "LR", catalogue)
+	writeUnionBackground(t, products, "LR", report.Background{
+		Filter: "L", X: 20, Y: 20, Size: 21,
+		Mean: 0.01, Noise: 0.001, SNR: 10, Pixels: 441,
+	})
+
+	clean := eraseTestSky(w, h, 0.01, 0.001, 1)
+	clean[starY*w+starX] = 0.2
+	writeFloatXISF(t, filepath.Join(products, "L", stackFileName(stackCleanKind, "L")),
+		w, h, clean)
+
+	rows := []report.Row{
+		{File: "a.xisf", Detected: true, Width: w, Height: h, PeakSNR: 20},
+		{File: "b.xisf", Detected: false, Width: w, Height: h, PeakSNR: 2},
+		{File: "c.xisf", Detected: true, Width: w, Height: h, PeakSNR: 20},
+	}
+	writeDetectionReport(t, filepath.Join(products, "L", detectionName), rows)
+
+	for i, name := range []string{"a.xisf", "b.xisf", "c.xisf"} {
+		plane := eraseTestSky(w, h, 0.02, 0.002, int64(10+i))
+		addEraseGhost(plane, w, artX, artY, 0.05, 4)
+		writeFloatXISF(t, filepath.Join(input, name), w, h, plane)
+	}
+	unlisted := eraseTestSky(w, h, 0.02, 0.002, 99)
+	addEraseGhost(unlisted, w, artX, artY, 0.05, 4)
+	writeFloatXISF(t, filepath.Join(input, "d.xisf"), w, h, unlisted)
+
+	// A detected frame with a non-default mode, which the rewrite must keep.
+	if err := os.Chmod(filepath.Join(input, "a.xisf"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Snapshot the frames that must not change at all.
+	untouched := make(map[string][]byte)
+	for _, name := range []string{"b.xisf", "d.xisf"} {
+		want, err := os.ReadFile(filepath.Join(input, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		untouched[name] = want
+	}
+
+	out := filepath.Join(root, "out")
+	opts := &eraseOptions{
+		input:    input,
+		output:   out,
+		products: products,
+		radius:   8,
+		feather:  2,
+		workers:  2,
+		inplace:  true,
+	}
+	if err := runErase(context.Background(), []string{input}, opts); err != nil {
+		t.Fatalf("runErase: %v", err)
+	}
+
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("in-place run created the output directory: %v", err)
+	}
+	if left, err := filepath.Glob(filepath.Join(input, ".xisf-*")); err != nil {
+		t.Fatal(err)
+	} else if len(left) > 0 {
+		t.Errorf("temporary files left behind: %v", left)
+	}
+
+	for name, want := range untouched {
+		got, err := os.ReadFile(filepath.Join(input, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s changed, want it untouched", name)
+		}
+	}
+
+	for _, name := range []string{"a.xisf", "c.xisf"} {
+		plane, fw, fh, err := loadPlane(filepath.Join(input, name))
+		if err != nil {
+			t.Fatalf("load %s: %v", name, err)
+		}
+		if fw != w || fh != h {
+			t.Fatalf("%s is %d×%d, want %dx%d", name, fw, fh, w, h)
+		}
+		if got := plane[artY*w+artX]; got > 0.03 {
+			t.Errorf("%s artefact centre = %v, want the ghost removed", name, got)
+		}
+		if got := plane[starY*w+starX]; got < 0.15 {
+			t.Errorf("%s star = %v, want the clean master's star transferred", name, got)
+		}
+	}
+
+	info, err := os.Stat(filepath.Join(input, "a.xisf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Errorf("in-place rewrite mode = %o, want 640", got)
 	}
 }
 

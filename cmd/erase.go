@@ -40,6 +40,7 @@ type eraseOptions struct {
 	radius     int
 	feather    int
 	workers    int
+	inplace    bool
 }
 
 func newEraseCmd() *cobra.Command {
@@ -54,6 +55,10 @@ using the filter's clean master as the source of ghost-free structure.
 Every .xisf frame of the selected filter is written to the output directory
 with its file name preserved. A frame is only modified when detection.csv
 marks it detected; the other frames are copied unchanged.
+
+With --inplace the detected frames are rewritten in the input directory
+instead of being copied, and no other frame is touched. Existing files are
+replaced, so keep a backup if you need the originals.
 
 The union catalogue defaults to <products>/<filters>/artefacts.csv, where
 <filters> is the same directory union writes (for L, R, G and B: LRGB). The
@@ -73,6 +78,9 @@ a visible disc.
 Output defaults to output/registered/<filter>/.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.inplace && cmd.Flags().Changed("output") {
+				return errors.New("--inplace and --output cannot be used together")
+			}
 			if err := opts.validate(); err != nil {
 				return err
 			}
@@ -107,6 +115,8 @@ Output defaults to output/registered/<filter>/.`,
 		"blend width in pixels inside the disc rim")
 	flags.IntVarP(&opts.workers, "workers", "j", 4,
 		"number of frames decoded and written concurrently")
+	flags.BoolVar(&opts.inplace, "inplace", false,
+		"rewrite the detected frames in the input directory instead of copying them")
 	return cmd
 }
 
@@ -116,7 +126,7 @@ func (o *eraseOptions) validate() error {
 			return fmt.Errorf("--filter: %w", err)
 		}
 	}
-	if strings.TrimSpace(o.output) == "" {
+	if !o.inplace && strings.TrimSpace(o.output) == "" {
 		return errors.New("--output must not be empty")
 	}
 	if strings.TrimSpace(o.products) == "" {
@@ -214,19 +224,23 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 		}
 	}
 	if unlisted > 0 {
-		slog.Warn("frames are not in the detection report and will be copied unchanged",
+		slog.Warn("frames are not in the detection report and will not be modified",
 			"frames", unlisted)
 	}
 
-	outDir := filepath.Join(opts.output, filter)
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
+	var outDir string
+	if !opts.inplace {
+		outDir = filepath.Join(opts.output, filter)
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return fmt.Errorf("create output directory: %w", err)
+		}
 	}
 
 	slog.Info("erasing artefacts",
 		"filter", filter,
 		"frames", len(paths),
 		"artefacts", len(artefacts),
+		"inplace", opts.inplace,
 		"background", backgroundPath,
 		"clean", cleanPath)
 
@@ -269,13 +283,19 @@ feed:
 			erased++
 		}
 	}
-	slog.Info("erase done",
+	done := []any{
 		"filter", filter,
-		"output", outDir,
 		"frames", len(paths),
 		"erased", erased,
-		"copied", len(paths)-erased,
-		"artefacts", len(artefacts))
+		"unchanged", len(paths) - erased,
+		"artefacts", len(artefacts),
+	}
+	if opts.inplace {
+		done = append(done, "inplace", true)
+	} else {
+		done = append(done, "output", outDir)
+	}
+	slog.Info("erase done", done...)
 	return nil
 }
 
@@ -285,11 +305,26 @@ func eraseFrame(ctx context.Context, src, outDir string, detected map[string]boo
 	background report.Background, artefacts []report.Artefact, opts *eraseOptions) (bool, error) {
 	name := filepath.Base(src)
 	dest := filepath.Join(outDir, name)
+	if opts.inplace {
+		dest = src
+	}
 	if !detected[name] {
+		if opts.inplace {
+			return false, nil
+		}
 		return false, copyFile(src, dest)
 	}
 	if err := ctx.Err(); err != nil {
 		return false, err
+	}
+
+	var mode os.FileMode
+	if opts.inplace {
+		info, err := os.Stat(src)
+		if err != nil {
+			return false, err
+		}
+		mode = info.Mode().Perm()
 	}
 
 	plane, fw, fh, err := loadPlane(src)
@@ -318,6 +353,13 @@ func eraseFrame(ctx context.Context, src, outDir string, detected map[string]boo
 	}
 	if err := writeErasedFrame(dest, src, plane); err != nil {
 		return false, err
+	}
+	if opts.inplace {
+		// WriteFile creates its temporary file with mode 0600; restore the
+		// source permissions that the rename replaced.
+		if err := os.Chmod(dest, mode); err != nil {
+			return false, err
+		}
 	}
 	slog.Debug("frame erased",
 		"file", name,

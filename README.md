@@ -299,6 +299,11 @@ A frame is only modified when `output/<filter>/detection.csv` marks it
 always contains every input frame with its original file name. Frames missing
 from the report are also copied unchanged, with a warning.
 
+With `--inplace` the detected frames are rewritten in the input directory
+instead. No copies are made, and clean or unlisted frames are left exactly as
+they are. The originals are replaced, so there is no backup: copy the frames
+first if you need to keep them.
+
 The repair uses three files written earlier:
 
 - the union catalogue, default `output/LRGB/artefacts.csv`;
@@ -314,8 +319,9 @@ matches the frame rather than the cleaner reference. A 6-pixel feather blends
 the patch into the surroundings, and the noise is seeded from the frame name
 and artefact number, so repeated runs give the same result.
 
-The repaired frames are written to `output/registered/<filter>/`. The input
-frames are never modified.
+By default the repaired frames are written to `output/registered/<filter>/`
+and the input frames are never modified. With `--inplace` the detected frames
+are replaced in place and nothing is written to the output directory.
 
 **Warning: passing clouds break the repair.** Inpainting assumes the sky
 background is stable between the frame and the clean master. A passing cloud
@@ -333,6 +339,7 @@ Main options:
 | --- | --- |
 | `-i` | Directory holding the frames, default `img/registered`. |
 | `-o` | Output root, default `output/registered`. |
+| `--inplace` | Rewrite detected frames in the input directory instead of copying them. |
 | `--filter` | Filter to repair. |
 | `--products` | Directory holding the scan, annotate and union results, default `output`. |
 | `--artefacts` | Union catalogue to use, when it is not the default. |
@@ -371,7 +378,9 @@ Finally, repair each filter:
 ./bin/exorciser erase --filter B
 ```
 
-Repaired frames land in `output/registered/<filter>/`.
+Repaired frames land in `output/registered/<filter>/`. Add `--inplace` to
+rewrite the registered frames themselves instead, for example
+`./bin/exorciser erase --filter L --inplace`.
 
 `output/cmd/L.sh`, `R.sh`, `G.sh` and `B.sh` run one filter each. The scripts
 assume you are in the project directory and that the program is at
