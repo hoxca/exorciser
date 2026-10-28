@@ -35,6 +35,9 @@ type detectOptions struct {
 	scales    []float64
 	// minSNR is the peak significance at which a frame is called detected.
 	minSNR float64
+	// minContrast is the smallest peak amplitude, in units of the background
+	// noise, at which a frame is called detected. Zero disables the test.
+	minContrast float64
 	// coord is the window centre, or nil to use the image centre.
 	coord *point
 	// dirtyCoord is the artefact centre in the dirty frame. It defaults to
@@ -82,6 +85,10 @@ ghost_sigma is 0 when the profile wins. --profile-radius sets the profile
 support radius (default 16); --margin must exceed it. The dirty frame is
 skipped from the analysis, just like the reference.
 
+The extracted profile is also saved as <output>/<filter>/artefact_profile.png,
+a grayscale view of the matched-filter kernel, and <output>/<filter>/artefact.npe,
+the same kernel with its extraction metadata in a text format.
+
 Both skipped frames still appear in the report. The reference row carries its
 own background noise and detected=false, with no matched-filter fields. The
 dirty row carries its extraction noise, its fitted norm, and a peak_snr from
@@ -98,6 +105,13 @@ fixed-position score would miss the ghost. Use --search-radius to bound that
 search around the window centre. detected is true when peak_snr reaches
 --min-snr, and the report's peak_x and peak_y locate the feature so a
 suspicious row can be inspected.
+
+--min-contrast adds a second, complementary test: peak_amp / noise must reach
+the given value. peak_snr grows with the number of pixels the kernel covers, so
+a broad, faint background gradient can pass --min-snr while being invisible.
+Contrast measures the feature's peak surface brightness instead. It is most
+useful with --dirty, whose compact profile reproduces the artefact's real core;
+a broad Gaussian dilutes that core and gives a much smaller peak_amp.
 
 Pixels beyond four times the background noise are masked before the Gaussian
 filtering, which removes stars and cosmic rays without a star mask. The profile
@@ -134,6 +148,9 @@ semicolon-delimited and uses a decimal comma.`,
 			}
 			if opts.minSNR <= 0 || math.IsNaN(opts.minSNR) || math.IsInf(opts.minSNR, 0) {
 				return fmt.Errorf("--min-snr must be a positive number, got %v", opts.minSNR)
+			}
+			if opts.minContrast < 0 || math.IsNaN(opts.minContrast) || math.IsInf(opts.minContrast, 0) {
+				return fmt.Errorf("--min-contrast must not be negative, got %v", opts.minContrast)
 			}
 			if opts.reference == "" {
 				return errors.New("--reference is required")
@@ -222,6 +239,8 @@ semicolon-delimited and uses a decimal comma.`,
 		"bound the peak search to this radius in pixels around the window centre (0: whole window)")
 	flags.Float64Var(&opts.minSNR, "min-snr", 6,
 		"peak significance at which a frame is reported as detected")
+	flags.Float64Var(&opts.minContrast, "min-contrast", 0,
+		"minimum peak amplitude in background-noise units (0: only --min-snr decides)")
 
 	return cmd
 }
@@ -394,6 +413,17 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 			"radius", profile.Radius,
 			"masked", profile.Masked,
 			"noise", profile.Noise)
+
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return fmt.Errorf("create output directory: %w", err)
+		}
+		pngPath, npePath, err := writeArtefactProfile(outDir, profile, filepath.Base(dirtyPath))
+		if err != nil {
+			return err
+		}
+		slog.Info("artefact profile written",
+			"png", pngPath,
+			"kernel", npePath)
 
 		dirtyWin, err := windowFor(opts.dirtyCoord, opts.window, dirty.width, dirty.height)
 		if err != nil {
@@ -751,8 +781,21 @@ func (d *detector) detect(path string) (row report.Row) {
 	row.PeakX, row.PeakY = res.PeakX, res.PeakY
 	row.PeakSNR, row.PeakAmp = res.PeakSNR, res.PeakAmp
 	row.Clipped = res.Masked
-	row.Detected = res.PeakSNR >= d.opts.minSNR
+	row.Detected = exceedsThresholds(res.PeakSNR, res.PeakAmp, res.Noise,
+		d.opts.minSNR, d.opts.minContrast)
 	return row
+}
+
+// exceedsThresholds reports whether a measurement passes both detection
+// thresholds. The contrast test compares the kernel-weighted peak amplitude
+// with the per-pixel background noise, so it measures how far the feature rises
+// above the noise rather than how much area the matched filter integrated.
+// A non-positive minContrast disables it.
+func exceedsThresholds(snr, amp, noise, minSNR, minContrast float64) bool {
+	if snr < minSNR {
+		return false
+	}
+	return minContrast <= 0 || amp >= minContrast*noise
 }
 
 func logDetection(r report.Row) {

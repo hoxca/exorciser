@@ -201,6 +201,45 @@ func TestDetectRejectsBadMinSNR(t *testing.T) {
 	}
 }
 
+func TestDetectRejectsBadMinContrast(t *testing.T) {
+	for _, value := range []string{"-1", "NaN", "Inf"} {
+		t.Run(value, func(t *testing.T) {
+			cmd := newDetectCmd()
+			cmd.SetArgs([]string{"--reference", "ref.xisf", "--min-contrast=" + value})
+			if err := cmd.Execute(); err == nil {
+				t.Fatalf("detect accepted --min-contrast %s, want an error", value)
+			}
+		})
+	}
+}
+
+func TestExceedsThresholds(t *testing.T) {
+	tests := []struct {
+		name        string
+		snr, amp    float64
+		noise       float64
+		minSNR      float64
+		minContrast float64
+		want        bool
+	}{
+		{name: "snr only", snr: 7, amp: 0.0001, noise: 0.0003, minSNR: 6, want: true},
+		{name: "snr below", snr: 5, amp: 0.001, noise: 0.0003, minSNR: 6, want: false},
+		{name: "contrast passes", snr: 50, amp: 0.001, noise: 0.0003, minSNR: 6, minContrast: 1.5, want: true},
+		{name: "broad faint feature", snr: 10, amp: 0.0002, noise: 0.0003, minSNR: 6, minContrast: 1.5, want: false},
+		{name: "contrast exactly at threshold", snr: 10, amp: 0.00045, noise: 0.0003, minSNR: 6, minContrast: 1.5, want: true},
+		{name: "negative contrast disables", snr: 7, amp: 0.0001, noise: 0.0003, minSNR: 6, minContrast: -1, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := exceedsThresholds(tt.snr, tt.amp, tt.noise, tt.minSNR, tt.minContrast)
+			if got != tt.want {
+				t.Errorf("exceedsThresholds(%v, %v, %v, %v, %v) = %v, want %v",
+					tt.snr, tt.amp, tt.noise, tt.minSNR, tt.minContrast, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDetectRequiresDirtyCoord(t *testing.T) {
 	cmd := newDetectCmd()
 	cmd.SetArgs([]string{"--reference", "ref.xisf", "--dirty", "003"})

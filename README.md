@@ -97,9 +97,9 @@ Examples (from `output/cmd/L_detect.sh` and `output/cmd/B_detect.sh`):
 
 ```
 ./bin/exorciser detect -i ./img/registered --filter L -o output -w 128 -j 8 \
-  --coord 2460,1978 \
+  --coord 2460,1978 --dirty 007 --dirty-coord 2464,1985 \
   --reference ./img/registered/Light_BIN-1_4096x4096_EXPOSURE-600.00s_FILTER-L_mono/VDB149_LIGHT_L_600s_BIN1_002_-09C_20220821_235716_905_W_c_r.xisf \
-  --ghost-sigma 4,8,16 --min-snr 5
+  --ghost-sigma 4,8,16 --min-snr 5 --min-contrast 1.5
 ```
 
 ```
@@ -120,8 +120,27 @@ Main options:
 | `--dirty-coord` | Position of the artefact in the dirty frame. Defaults to `--coord`, which is usually right because the frames are aligned. |
 | `-w` | Window size in pixels. Increase it if the artefact is larger than 128 pixels. |
 | `--min-snr` | How strong a detection must be. Lower values find fainter artefacts but also more false positives. |
+| `--min-contrast` | Smallest `peak_amp / noise`: how far the artefact's peak rises above the per-pixel noise. `0` disables the test. |
 | `--ghost-sigma` | Expected artefact sizes, in pixels: small, medium, large. |
 | `--search-radius` | Limit the search around `--coord`. `0` searches the whole window. |
+
+`--min-snr` grows with the number of pixels a kernel covers, so a broad, faint
+background gradient can pass it while being invisible. `--min-contrast` tests
+the peak surface brightness instead. It is most useful with `--dirty`: the
+extracted profile includes the artefact's compact core, which a wide Gaussian
+averages away. With the profile, a real ghost typically has a contrast of 3 or
+more, while diffuse background structure stays below 1.
+
+When `--dirty` is used, the extracted profile is saved as two files:
+
+- `output/<filter>/artefact_profile.png` - a grayscale view of the matched-filter
+  kernel, with each kernel sample drawn as an 8x8 block and the brightest
+  sample in white;
+- `output/<filter>/artefact.npe` - the numerical kernel, with the extraction
+  metadata. The file is text: comment lines record the format version, dirty
+  frame, centre, radius, noise and masked-pixel count, then `radius*2+1` rows
+  each hold `radius*2+1` full-precision samples in row-major order. The kernel
+  is normalised to sum one, exactly as used by `detect`.
 
 The result is `output/<filter>/detection.csv`, one row per frame. The frames
 listed with `detected;true` are the ones that show the artefact. The reference
@@ -402,6 +421,8 @@ a few pixels of the one for B, but measure it in each filter.
 | File | Contents |
 | --- | --- |
 | `output/<filter>/detection.csv` | Per-frame detection table from `detect`. |
+| `output/<filter>/artefact_profile.png` | Visual profile kernel from `detect --dirty`. |
+| `output/<filter>/artefact.npe` | Numerical profile kernel from `detect --dirty`. |
 | `output/<filter>/artefacts.csv` | Artefact catalogue from `scan`. |
 | `output/<filter>/<filter>_stack_clean.xisf` | Stack of the clean frames. |
 | `output/<filter>/<filter>_stack_ghost.xisf` | Stack of the frames containing the artefact. |
@@ -423,6 +444,7 @@ The columns that matter most:
 | `file` | Frame file name. |
 | `detected` | `true` when the artefact was found in that frame. |
 | `peak_snr` | Strength of the detection. Higher is stronger; the `--min-snr` value is the cut-off. |
+| `peak_amp` | Peak amplitude in pixel units. `peak_amp / noise` is the contrast tested by `--min-contrast`. |
 | `peak_x`, `peak_y` | Where the strongest response was found in that frame. |
 | `ghost_sigma` | Apparent size of the feature in pixels. |
 | `error` | Why a frame could not be measured, if that happened. |
@@ -460,6 +482,7 @@ and noise are recorded in `background.csv`.
 | --- | --- | --- |
 | `--window` | 128 | The artefact is larger than about 100 pixels. |
 | `--min-snr` | 6 | Too many or too few frames are marked detected. |
+| `--min-contrast` | 0 | Diffuse background structure passes `--min-snr`. Use about 1.5 with `--dirty`. |
 | `--ghost-sigma` | 4,8,16 | Every artefact of interest is larger or smaller than these sizes. |
 | `--search-radius` | 0 | A bright object near the artefact confuses the search. |
 | `--dirty`, `--dirty-coord` | unset | The artefact has a distinctive shape and detection is ambiguous. |
@@ -511,6 +534,13 @@ frame really is clean.
 **The artefact disappears completely**
 The reference frame probably contains it as well, so it cancels in the
 subtraction. Choose another reference.
+
+**A frame passes `--min-snr` but no artefact is visible**
+The field's own diffuse background varies slightly between frames, and a broad
+kernel integrates that structure into a significant peak. Add `--dirty` with a
+frame where the artefact is obvious, so the core of the artefact is matched,
+then set `--min-contrast` to about `1.5`. A real ghost's core rises several
+noise sigmas above the background; diffuse structure stays near or below one.
 
 **Yellow markers are in the wrong place**
 Positions differ by more than the tolerance between filters. Raise
