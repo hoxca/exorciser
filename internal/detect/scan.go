@@ -80,11 +80,26 @@ type ScanOptions struct {
 	// Mask marks pixels to exclude, for example the stars of the clean master.
 	// A nil mask excludes nothing. The slice must cover the image.
 	Mask []bool
+	// Profile, when set, adds a non-separable matched filter built from a
+	// known artefact shape. When Profile is set and Scales is empty, only the
+	// profile is used.
+	Profile *Profile
+	// ProfileScales are multipliers applied to Profile.Radius before matching.
+	// Each one covers a different apparent size. The zero value means [1].
+	ProfileScales []float64
+	// MaxPeakRatio rejects a profile candidate whose local peak residual is
+	// more than this multiple of the matched amplitude. A star has a sharp
+	// core far above its smooth matched response; a diffuse ghost does not.
+	// Zero disables the test.
+	MaxPeakRatio float64
 }
 
 func (o ScanOptions) withDefaults() ScanOptions {
-	if len(o.Scales) == 0 {
+	if o.Profile == nil && len(o.Scales) == 0 {
 		o.Scales = []float64{4, 8, 16}
+	}
+	if o.Profile != nil && len(o.ProfileScales) == 0 {
+		o.ProfileScales = []float64{1}
 	}
 	if o.MinSNR == 0 {
 		o.MinSNR = 6
@@ -118,8 +133,34 @@ func (o ScanOptions) validate() error {
 			return fmt.Errorf("ghost scale must be positive, got %v", s)
 		}
 	}
+	if o.Profile == nil {
+		if len(o.ProfileScales) > 0 {
+			return errors.New("a profile scale was given without a profile")
+		}
+		return nil
+	}
+	if err := o.Profile.validate(); err != nil {
+		return err
+	}
+	for _, factor := range o.ProfileScales {
+		if factor <= 0 || !finite(factor) {
+			return fmt.Errorf("profile scale must be positive, got %v", factor)
+		}
+		radius := int(math.Round(float64(o.Profile.Radius) * factor))
+		if radius < 1 || radius > maxProfileRadius {
+			return fmt.Errorf("profile scale %v gives radius %d, want 1..%d",
+				factor, radius, maxProfileRadius)
+		}
+	}
+	if o.MaxPeakRatio < 0 || !finite(o.MaxPeakRatio) {
+		return fmt.Errorf("maximum peak ratio must not be negative, got %v", o.MaxPeakRatio)
+	}
 	return nil
 }
+
+// maxProfileRadius bounds a scaled profile kernel to keep a mistyped scale from
+// allocating an enormous convolution kernel.
+const maxProfileRadius = 512
 
 // Artefact is one diffuse feature found by Scan. SNR and Amp are signed, so a
 // darker-than-background feature is reported with negative values.
@@ -187,6 +228,14 @@ func Scan(plane []float32, w, h int, opts ScanOptions) ([]Artefact, error) {
 	if validCount == 0 {
 		return nil, errors.New("every pixel was masked")
 	}
+
+	// Keep the unmasked residual for the peak-sharpness test. Stars are the
+	// compact features that test must see, and the star mask would hide them.
+	var sharpRes []float64
+	if opts.Profile != nil && opts.MaxPeakRatio > 0 {
+		sharpRes = slices.Clone(res)
+	}
+
 	for i := 0; i < w*h; i++ {
 		if opts.Mask != nil && opts.Mask[i] && valid[i] != 0 {
 			valid[i] = 0
@@ -212,7 +261,121 @@ func Scan(plane []float32, w, h int, opts ScanOptions) ([]Artefact, error) {
 		}
 		candidates = append(candidates, found...)
 	}
+	if opts.Profile != nil {
+		for _, factor := range opts.ProfileScales {
+			profile, err := opts.Profile.Scaled(factor)
+			if err != nil {
+				return nil, fmt.Errorf("scale profile by %v: %w", factor, err)
+			}
+			found, err := scanProfile(res, valid, sharpRes, w, h, noise, profile, opts)
+			if err != nil {
+				return nil, err
+			}
+			candidates = append(candidates, found...)
+		}
+	}
 	return mergeArtefacts(candidates), nil
+}
+
+// peakRatioKeeps reports whether the local peak around (x,y) stays within
+// maxRatio times the matched amplitude. The peak is read from the unmasked
+// residual, where a star's core is visible even when the matching mask hides it.
+func peakRatioKeeps(res []float64, w, h, x, y, radius int, maxRatio, amp float64) bool {
+	if res == nil || maxRatio <= 0 || amp == 0 {
+		return true
+	}
+	limit := maxRatio * math.Abs(amp)
+	for dy := -radius; dy <= radius; dy++ {
+		yy := y + dy
+		if yy < 0 || yy >= h {
+			continue
+		}
+		line := yy * w
+		for dx := -radius; dx <= radius; dx++ {
+			xx := x + dx
+			if xx < 0 || xx >= w {
+				continue
+			}
+			if math.Abs(res[line+xx]) > limit {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// scanProfile matched-filters a non-separable profile kernel and returns its
+// non-maximum-suppressed candidates. Scale is the equivalent Gaussian sigma,
+// half the profile radius, so merging and the union background exclusion keep
+// their existing units.
+func scanProfile(res, valid, sharpRes []float64, w, h int, noise float64, profile Profile, opts ScanOptions) ([]Artefact, error) {
+	kernel := profile.normalized()
+	if len(kernel) != (2*profile.Radius+1)*(2*profile.Radius+1) {
+		return nil, errors.New("profile kernel does not match its radius")
+	}
+	radius := profile.Radius
+	kernelSquared := squared(kernel)
+
+	signal := convolve2DPlane(res, w, h, kernel, radius, opts.Workers)
+	weight := convolve2DPlane(valid, w, h, kernel, radius, opts.Workers)
+	noiseSq := convolve2DPlane(valid, w, h, kernelSquared, radius, opts.Workers)
+
+	var sum float64
+	for _, k := range kernel {
+		sum += k
+	}
+	fullWeight := sum * sum
+	scale := float64(radius) / 2
+
+	var candidates []Artefact
+	for y := 0; y < h; y++ {
+		line := y * w
+		for x := 0; x < w; x++ {
+			i := line + x
+			if weight[i] <= 0.5*fullWeight || noiseSq[i] <= 0 {
+				continue
+			}
+			snr := signal[i] / (noise * math.Sqrt(noiseSq[i]))
+			if math.Abs(snr) < opts.MinSNR || !opts.Polarity.accepts(snr) {
+				continue
+			}
+			amp := signal[i] / weight[i]
+			search := max(2, profile.Radius*2/3)
+			if !peakRatioKeeps(sharpRes, w, h, x, y, search, opts.MaxPeakRatio, amp) {
+				continue
+			}
+			candidates = append(candidates, Artefact{
+				X:     x,
+				Y:     y,
+				Scale: scale,
+				SNR:   snr,
+				Amp:   amp,
+			})
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	return suppressCandidates(candidates, 4*scale), nil
+}
+
+// suppressCandidates keeps the strongest candidate of each position group.
+func suppressCandidates(candidates []Artefact, mergeRadius float64) []Artefact {
+	slices.SortFunc(candidates, compareArtefacts)
+	kept := candidates[:0]
+	for _, c := range candidates {
+		duplicate := false
+		for _, k := range kept {
+			if within(c, k, mergeRadius) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			kept = append(kept, c)
+		}
+	}
+	return kept
 }
 
 // StarMaskOptions configures StarMask.
@@ -582,6 +745,41 @@ func convolvePlane(src []float64, w, h int, kernel []float64, workers int) []flo
 			var sum float64
 			for yy := lo; yy <= hi; yy++ {
 				sum += tmp[yy*w+x] * kernel[yy-y+r]
+			}
+			out[line+x] = sum
+		}
+	})
+	return out
+}
+
+// convolve2DPlane convolves a w×h plane with a non-separable square kernel of
+// side 2r+1. Pixels outside the plane are treated as zero, matching
+// convolvePlane. The caller supplies the valid mask through separate calls.
+func convolve2DPlane(src []float64, w, h int, kernel []float64, r, workers int) []float64 {
+	side := 2*r + 1
+	out := make([]float64, w*h)
+	parallelRows(h, workers, func(y int) {
+		line := y * w
+		for x := 0; x < w; x++ {
+			var sum float64
+			for ky := -r; ky <= r; ky++ {
+				yy := y + ky
+				if yy < 0 || yy >= h {
+					continue
+				}
+				srcLine := yy * w
+				kLine := (ky + r) * side
+				for kx := -r; kx <= r; kx++ {
+					weight := kernel[kLine+kx+r]
+					if weight == 0 {
+						continue
+					}
+					xx := x + kx
+					if xx < 0 || xx >= w {
+						continue
+					}
+					sum += src[srcLine+xx] * weight
+				}
 			}
 			out[line+x] = sum
 		}

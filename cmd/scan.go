@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -64,11 +65,16 @@ type scanOptions struct {
 	starHaloSmall   int
 	starHaloMinArea int
 	starHaloMin     float64
+	profile         bool
+	profileFile     string
+	profileScales   []float64
+	keepGaussian    bool
+	maxPeakRatio    float64
 }
 
 func newScanCmd() *cobra.Command {
 	opts := &scanOptions{}
-	var scales, polarity string
+	var scales, polarity, profileScales string
 
 	cmd := &cobra.Command{
 		Use:   "scan [path...]",
@@ -94,6 +100,16 @@ The difference is searched with Gaussian matched filters at several scales.
 Every local maximum whose absolute signal-to-noise ratio reaches --min-snr and
 whose sign matches --polarity is numbered in artefacts.csv, strongest first,
 with its registered pixel position.
+
+--profile reuses the kernel saved by detect --dirty in
+<output>/<filter>/artefact.npe and matches that shape across the whole
+difference. The profile replaces the Gaussian scales unless --ghost-sigma is
+given explicitly, in which case both are searched and merged. Intensity is
+handled by the signal-to-noise ratio; --profile-scale lists multipliers of the
+profile radius so a slightly smaller or larger version of the same shape is
+still matched. --max-peak-ratio rejects candidates whose local peak is much
+sharper than their matched response, which removes stars and other compact
+residuals. --profile-file points at a different .npe file.
 
 --polarity both accepts bright and dark features. positive keeps only features
 brighter than the clean master; negative keeps only darker ones. Polarity is
@@ -177,6 +193,9 @@ and use a decimal comma.`,
 			if opts.starHaloMin <= 0 || math.IsNaN(opts.starHaloMin) || math.IsInf(opts.starHaloMin, 0) {
 				return fmt.Errorf("--star-halo-min must be a positive number, got %v", opts.starHaloMin)
 			}
+			if opts.maxPeakRatio < 0 || math.IsNaN(opts.maxPeakRatio) || math.IsInf(opts.maxPeakRatio, 0) {
+				return fmt.Errorf("--max-peak-ratio must not be negative, got %v", opts.maxPeakRatio)
+			}
 			if filepath.Ext(opts.outputDir) == ".csv" {
 				return fmt.Errorf("--output is a directory and the file is always %s, got %q",
 					artefactsName, opts.outputDir)
@@ -187,6 +206,19 @@ and use a decimal comma.`,
 				return err
 			}
 			opts.scales = parsed
+
+			factors, err := parseProfileScales(profileScales)
+			if err != nil {
+				return err
+			}
+			opts.profileScales = factors
+			opts.keepGaussian = cmd.Flags().Changed("ghost-sigma")
+			if opts.profileFile != "" {
+				opts.profile = true
+			}
+			if !opts.profile && cmd.Flags().Changed("profile-scale") {
+				return errors.New("--profile-scale requires --profile or --profile-file")
+			}
 
 			polarityMode, err := detect.ParsePolarity(polarity)
 			if err != nil {
@@ -245,8 +277,37 @@ and use a decimal comma.`,
 		"minimum saturated pixels for the big-star halo")
 	flags.Float64Var(&opts.starHaloMin, "star-halo-min", 0.9,
 		"minimum pixel value for a saturated star")
+	flags.BoolVar(&opts.profile, "profile", false,
+		"reuse <output>/<filter>/"+artefactProfileNPE+" as a matched filter")
+	flags.StringVar(&opts.profileFile, "profile-file", "",
+		"use this artefact.npe file instead of the default")
+	flags.StringVar(&profileScales, "profile-scale", "0.75,1,1.25",
+		"profile size multipliers, comma separated")
+	flags.Float64Var(&opts.maxPeakRatio, "max-peak-ratio", 15,
+		"reject profile candidates whose local peak exceeds this multiple of their amplitude; 0 disables")
 
 	return cmd
+}
+
+// parseProfileScales parses the comma-separated size multipliers used for a
+// profile matched filter.
+func parseProfileScales(s string) ([]float64, error) {
+	var scales []float64
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(part, 64)
+		if err != nil || v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("--profile-scale wants positive comma-separated numbers, got %q", s)
+		}
+		scales = append(scales, v)
+	}
+	if len(scales) == 0 {
+		return nil, errors.New("--profile-scale needs at least one multiplier")
+	}
+	return scales, nil
 }
 
 func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
@@ -262,6 +323,26 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		return err
 	}
 	outDir := outputFilterDir(opts.outputDir, filter)
+
+	var profile *detect.Profile
+	if opts.profile {
+		profilePath := opts.profileFile
+		if profilePath == "" {
+			profilePath = filepath.Join(outDir, artefactProfileNPE)
+		}
+		loaded, err := readArtefactProfile(profilePath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("no artefact profile at %s; run detect --dirty or pass --profile-file", profilePath)
+			}
+			return fmt.Errorf("read artefact profile %s: %w", profilePath, err)
+		}
+		profile = &loaded
+		slog.Info("artefact profile loaded",
+			"path", profilePath,
+			"radius", loaded.Radius,
+			"scales", opts.profileScales)
+	}
 
 	reportPath := opts.report
 	if reportPath == "" {
@@ -429,13 +510,23 @@ func runScan(ctx context.Context, roots []string, opts *scanOptions) error {
 		"height", h,
 		"polarity", opts.polarity.String())
 
-	found, err := detect.Scan(diff, w, h, detect.ScanOptions{
-		Scales:   opts.scales,
-		MinSNR:   opts.minSNR,
-		Polarity: opts.polarity,
-		Workers:  opts.workers,
-		Mask:     mask,
-	})
+	scanOpts := detect.ScanOptions{
+		Scales:        opts.scales,
+		Profile:       profile,
+		ProfileScales: opts.profileScales,
+		MaxPeakRatio:  opts.maxPeakRatio,
+		MinSNR:        opts.minSNR,
+		Polarity:      opts.polarity,
+		Workers:       opts.workers,
+		Mask:          mask,
+	}
+	if profile != nil && !opts.keepGaussian {
+		scanOpts.Scales = nil
+	}
+	if profile == nil {
+		scanOpts.ProfileScales = nil
+	}
+	found, err := detect.Scan(diff, w, h, scanOpts)
 	if err != nil {
 		return fmt.Errorf("scan difference: %w", err)
 	}

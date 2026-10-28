@@ -5,6 +5,7 @@ import (
 	"context"
 	"image"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -132,6 +133,90 @@ func TestWriteProfileNPE(t *testing.T) {
 				t.Errorf("kernel[%d][%d] = %v, want %v", y, x, got, want)
 			}
 		}
+	}
+}
+
+func TestReadArtefactProfileRoundTrip(t *testing.T) {
+	p := detect.Profile{
+		Radius: 1,
+		X:      10,
+		Y:      11,
+		ShiftX: -1,
+		ShiftY: 2,
+		Noise:  0.0003,
+		Masked: 7,
+		Kernel: []float64{
+			0, 0.5, 0,
+			1, 2, 0,
+			0, 0, 0,
+		},
+	}
+	path := filepath.Join(t.TempDir(), "artefact.npe")
+	if err := writeProfileNPE(path, p, "dirty.xisf"); err != nil {
+		t.Fatalf("writeProfileNPE: %v", err)
+	}
+
+	got, err := readArtefactProfile(path)
+	if err != nil {
+		t.Fatalf("readArtefactProfile: %v", err)
+	}
+	if got.Radius != p.Radius || got.X != p.X || got.Y != p.Y ||
+		got.ShiftX != p.ShiftX || got.ShiftY != p.ShiftY ||
+		got.Noise != p.Noise || got.Masked != p.Masked {
+		t.Errorf("metadata = %+v, want %+v", got, p)
+	}
+	if len(got.Kernel) != len(p.Kernel) {
+		t.Fatalf("kernel has %d samples, want %d", len(got.Kernel), len(p.Kernel))
+	}
+	var sum float64
+	for i, v := range got.Kernel {
+		want := p.Kernel[i] / 3.5 // the writer stores the raw kernel; the reader normalises
+		if math.Abs(v-want) > 1e-12 {
+			t.Errorf("kernel[%d] = %v, want %v", i, v, want)
+		}
+		sum += v
+	}
+	if math.Abs(sum-1) > 1e-12 {
+		t.Errorf("kernel sums to %v, want 1", sum)
+	}
+}
+
+func TestReadArtefactProfileRejectsBadFile(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "version",
+			text: "# version: 2\n# radius: 1\n# kernel: 3x3\n1 0 0\n0 0 0\n0 0 0\n",
+		},
+		{
+			name: "rows",
+			text: "# version: 1\n# radius: 1\n# kernel: 3x3\n1 0 0\n0 0 0\n",
+		},
+		{
+			name: "columns",
+			text: "# version: 1\n# radius: 1\n# kernel: 3x3\n1 0\n0 0 0\n0 0 0\n",
+		},
+		{
+			name: "negative",
+			text: "# version: 1\n# radius: 1\n# kernel: 3x3\n1 0 0\n0 -1 0\n0 0 0\n",
+		},
+		{
+			name: "radius",
+			text: "# version: 1\n# radius: 2\n# kernel: 3x3\n1 0 0\n0 0 0\n0 0 0\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "artefact.npe")
+			if err := os.WriteFile(path, []byte(tt.text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readArtefactProfile(path); err == nil {
+				t.Fatal("readArtefactProfile accepted a malformed profile")
+			}
+		})
 	}
 }
 

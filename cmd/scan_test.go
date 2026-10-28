@@ -45,6 +45,11 @@ func TestScanRejectsBadFlags(t *testing.T) {
 		{name: "star halo min nan", args: []string{"--star-halo-min", "NaN"}},
 		{name: "csv output", args: []string{"-o", "out.csv"}},
 		{name: "scales", args: []string{"--ghost-sigma", "four"}},
+		{name: "profile scale without profile", args: []string{"--profile-scale", "1"}},
+		{name: "profile scale", args: []string{"--profile", "--profile-scale", "zero"}},
+		{name: "profile scale zero", args: []string{"--profile", "--profile-scale", "0"}},
+		{name: "max peak ratio negative", args: []string{"--max-peak-ratio", "-0.1"}},
+		{name: "max peak ratio nan", args: []string{"--max-peak-ratio", "NaN"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

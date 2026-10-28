@@ -65,6 +65,106 @@ func TestScanFindsGhost(t *testing.T) {
 	}
 }
 
+func TestScanWithProfile(t *testing.T) {
+	const w, h = 512, 512
+	const gx, gy = 300, 200
+	plane := syntheticPlane(w, h, []injected{{x: gx, y: gy, sigma: 10, amp: 0.03}}, 0.01, 1)
+
+	profile := gaussianProfile(16, 8)
+	arts, err := detect.Scan(plane, w, h, detect.ScanOptions{
+		Profile:       &profile,
+		ProfileScales: []float64{0.75, 1, 1.25},
+		MinSNR:        6,
+		Workers:       4,
+	})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(arts) == 0 {
+		t.Fatal("Scan found no artefact with the profile")
+	}
+	top := arts[0]
+	if math.Abs(float64(top.X-gx)) > 6 || math.Abs(float64(top.Y-gy)) > 6 {
+		t.Errorf("top artefact at (%d,%d), want near (%d,%d)", top.X, top.Y, gx, gy)
+	}
+	if top.Scale < 6 || top.Scale > 10 {
+		t.Errorf("scale = %v, want a scaled-profile equivalent sigma", top.Scale)
+	}
+}
+
+func TestScanMaxPeakRatioRejectsCompactSource(t *testing.T) {
+	const w, h = 512, 512
+	const (
+		compactX, compactY = 120, 120
+		smoothX, smoothY   = 360, 360
+	)
+	plane := syntheticPlane(w, h, []injected{
+		{x: compactX, y: compactY, sigma: 1, amp: 0.2},
+		{x: smoothX, y: smoothY, sigma: 10, amp: 0.03},
+	}, 0.01, 2)
+
+	profile := gaussianProfile(16, 8)
+	run := func(smoothness float64) []detect.Artefact {
+		t.Helper()
+		arts, err := detect.Scan(plane, w, h, detect.ScanOptions{
+			Profile:       &profile,
+			ProfileScales: []float64{0.75, 1},
+			MaxPeakRatio:  smoothness,
+			MinSNR:        5,
+			Workers:       4,
+		})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		return arts
+	}
+	near := func(arts []detect.Artefact, x, y, radius float64) bool {
+		for _, a := range arts {
+			if math.Hypot(float64(a.X)-x, float64(a.Y)-y) <= radius {
+				return true
+			}
+		}
+		return false
+	}
+
+	unfiltered := run(0)
+	if !near(unfiltered, compactX, compactY, 10) {
+		t.Fatalf("unfiltered scan did not find the compact source: %v", unfiltered)
+	}
+	if !near(unfiltered, smoothX, smoothY, 10) {
+		t.Fatalf("unfiltered scan did not find the smooth source: %v", unfiltered)
+	}
+
+	filtered := run(15)
+	if near(filtered, compactX, compactY, 10) {
+		t.Errorf("smoothness filter kept the compact source: %v", filtered)
+	}
+	if !near(filtered, smoothX, smoothY, 10) {
+		t.Errorf("smoothness filter rejected the smooth source: %v", filtered)
+	}
+}
+
+func gaussianProfile(radius int, sigma float64) detect.Profile {
+	side := 2*radius + 1
+	kernel := make([]float64, side*side)
+	var sum float64
+	for y := 0; y < side; y++ {
+		for x := 0; x < side; x++ {
+			dx, dy := float64(x-radius), float64(y-radius)
+			if dx*dx+dy*dy > float64(radius*radius) {
+				continue
+			}
+			v := math.Exp(-(dx*dx + dy*dy) / (2 * sigma * sigma))
+			kernel[y*side+x] = v
+			sum += v
+		}
+	}
+	for i := range kernel {
+		kernel[i] /= sum
+	}
+	return detect.Profile{Radius: radius, Kernel: kernel}
+}
+
 func TestScanFindsSeveralGhosts(t *testing.T) {
 	const w, h = 512, 512
 	plane := syntheticPlane(w, h, []injected{

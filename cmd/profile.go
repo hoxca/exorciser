@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/hoxca/exorciser/internal/detect"
 )
@@ -133,6 +134,154 @@ func writeProfileNPE(path string, p detect.Profile, dirty string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// readArtefactProfile parses an artefact.npe file. The format is produced by
+// writeProfileNPE. The kernel is normalised to sum one on read.
+func readArtefactProfile(path string) (detect.Profile, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return detect.Profile{}, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var p detect.Profile
+	var rows [][]float64
+	version := ""
+	side := 0
+	lineNo := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		lineNo++
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			body := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			key, value, ok := strings.Cut(body, ":")
+			if !ok {
+				continue
+			}
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			switch key {
+			case "version":
+				version = value
+			case "radius":
+				if p.Radius, err = strconv.Atoi(value); err != nil {
+					return detect.Profile{}, fmt.Errorf("%s:%d: radius %q: %w", path, lineNo, value, err)
+				}
+			case "x":
+				if p.X, err = strconv.Atoi(value); err != nil {
+					return detect.Profile{}, fmt.Errorf("%s:%d: x %q: %w", path, lineNo, value, err)
+				}
+			case "y":
+				if p.Y, err = strconv.Atoi(value); err != nil {
+					return detect.Profile{}, fmt.Errorf("%s:%d: y %q: %w", path, lineNo, value, err)
+				}
+			case "shift_x":
+				if p.ShiftX, err = strconv.Atoi(value); err != nil {
+					return detect.Profile{}, fmt.Errorf("%s:%d: shift_x %q: %w", path, lineNo, value, err)
+				}
+			case "shift_y":
+				if p.ShiftY, err = strconv.Atoi(value); err != nil {
+					return detect.Profile{}, fmt.Errorf("%s:%d: shift_y %q: %w", path, lineNo, value, err)
+				}
+			case "noise":
+				if p.Noise, err = strconv.ParseFloat(value, 64); err != nil {
+					return detect.Profile{}, fmt.Errorf("%s:%d: noise %q: %w", path, lineNo, value, err)
+				}
+			case "masked":
+				if p.Masked, err = strconv.Atoi(value); err != nil {
+					return detect.Profile{}, fmt.Errorf("%s:%d: masked %q: %w", path, lineNo, value, err)
+				}
+			case "kernel":
+				fields := strings.Fields(value)
+				if len(fields) > 0 {
+					if side, err = parseKernelSide(fields[0]); err != nil {
+						return detect.Profile{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+					}
+				}
+			}
+			continue
+		}
+
+		fields := strings.Fields(line)
+		row := make([]float64, len(fields))
+		for i, field := range fields {
+			v, err := strconv.ParseFloat(field, 64)
+			if err != nil {
+				return detect.Profile{}, fmt.Errorf("%s:%d: kernel sample %q: %w", path, lineNo, field, err)
+			}
+			if v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+				return detect.Profile{}, fmt.Errorf("%s:%d: kernel sample %q is negative or non-finite", path, lineNo, field)
+			}
+			row[i] = v
+		}
+		rows = append(rows, row)
+	}
+	if err := sc.Err(); err != nil {
+		return detect.Profile{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	if version != "" && version != "1" {
+		return detect.Profile{}, fmt.Errorf("%s: unsupported profile version %q", path, version)
+	}
+	if side == 0 {
+		side = len(rows)
+	}
+	if p.Radius == 0 && side > 0 && side%2 == 1 {
+		p.Radius = (side - 1) / 2
+	}
+	if p.Radius < 1 {
+		return detect.Profile{}, fmt.Errorf("%s: profile has radius %d", path, p.Radius)
+	}
+	if side != 2*p.Radius+1 {
+		return detect.Profile{}, fmt.Errorf("%s: kernel side %d does not match radius %d", path, side, p.Radius)
+	}
+	if len(rows) != side {
+		return detect.Profile{}, fmt.Errorf("%s: kernel has %d rows, want %d", path, len(rows), side)
+	}
+	kernel := make([]float64, 0, side*side)
+	var sum float64
+	for row, values := range rows {
+		if len(values) != side {
+			return detect.Profile{}, fmt.Errorf("%s: kernel row %d has %d samples, want %d",
+				path, row+1, len(values), side)
+		}
+		for _, v := range values {
+			kernel = append(kernel, v)
+			sum += v
+		}
+	}
+	if sum <= 0 {
+		return detect.Profile{}, fmt.Errorf("%s: kernel is empty", path)
+	}
+	for i := range kernel {
+		kernel[i] /= sum
+	}
+	p.Kernel = kernel
+	return p, nil
+}
+
+// parseKernelSide parses the "33x33" token from the kernel header.
+func parseKernelSide(s string) (int, error) {
+	parts := strings.FieldsFunc(s, func(r rune) bool { return r == 'x' || r == 'X' })
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("kernel size %q is not WIDTHxHEIGHT", s)
+	}
+	w, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, fmt.Errorf("kernel width %q: %w", parts[0], err)
+	}
+	h, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, fmt.Errorf("kernel height %q: %w", parts[1], err)
+	}
+	if w != h || w < 3 || w%2 == 0 {
+		return 0, fmt.Errorf("kernel size %q must be a square odd number of at least 3", s)
+	}
+	return w, nil
 }
 
 // checkProfileKernel validates a profile and returns its side length and

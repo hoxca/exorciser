@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -162,6 +163,79 @@ func TestScoreProfileIgnoresDarkGhost(t *testing.T) {
 	if res.PeakSNR > 5.5 {
 		t.Errorf("PeakSNR = %.2f on a dark ghost, want a noise-level response", res.PeakSNR)
 	}
+}
+
+func TestProfileScaled(t *testing.T) {
+	p := testProfile(16, 8)
+	tests := []struct {
+		factor float64
+		radius int
+	}{
+		{0.5, 8},
+		{1, 16},
+		{1.25, 20},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprint(tt.factor), func(t *testing.T) {
+			got, err := p.Scaled(tt.factor)
+			if err != nil {
+				t.Fatalf("Scaled: %v", err)
+			}
+			if got.Radius != tt.radius {
+				t.Fatalf("Radius = %d, want %d", got.Radius, tt.radius)
+			}
+			side := 2*tt.radius + 1
+			if len(got.Kernel) != side*side {
+				t.Fatalf("kernel has %d samples, want %d", len(got.Kernel), side*side)
+			}
+			var sum float64
+			peak := 0.0
+			for i, v := range got.Kernel {
+				if v < 0 || !finite(v) {
+					t.Fatalf("kernel[%d] = %v, want finite non-negative", i, v)
+				}
+				peak = math.Max(peak, v)
+				sum += v
+			}
+			if math.Abs(sum-1) > 1e-9 {
+				t.Errorf("kernel sums to %v, want 1", sum)
+			}
+			if got.Kernel[(side*side)/2] != peak {
+				t.Errorf("centre is not the maximum")
+			}
+		})
+	}
+}
+
+func TestProfileScaledRejectsBadFactor(t *testing.T) {
+	p := testProfile(8, 4)
+	for _, factor := range []float64{0, -1, math.NaN(), math.Inf(1)} {
+		if _, err := p.Scaled(factor); err == nil {
+			t.Errorf("Scaled(%v) succeeded, want an error", factor)
+		}
+	}
+}
+
+// testProfile builds a normalised Gaussian profile for the scaling tests.
+func testProfile(radius int, sigma float64) Profile {
+	side := 2*radius + 1
+	kernel := make([]float64, side*side)
+	var sum float64
+	for y := 0; y < side; y++ {
+		for x := 0; x < side; x++ {
+			dx, dy := float64(x-radius), float64(y-radius)
+			if dx*dx+dy*dy > float64(radius*radius) {
+				continue
+			}
+			v := math.Exp(-(dx*dx + dy*dy) / (2 * sigma * sigma))
+			kernel[y*side+x] = v
+			sum += v
+		}
+	}
+	for i := range kernel {
+		kernel[i] /= sum
+	}
+	return Profile{Radius: radius, Kernel: kernel}
 }
 
 func TestScoreRejectsBadProfile(t *testing.T) {

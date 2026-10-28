@@ -162,6 +162,32 @@ was present in some frames but not in others. The whole difference image is
 then searched, so artefacts far from the coordinate you supplied in step 1 are
 found too.
 
+If step 1 was run with `--dirty`, the extracted shape is in
+`output/<filter>/artefact.npe`. Add `--profile` to use that shape as an
+additional matched filter:
+
+```
+./bin/exorciser scan --filter L --profile
+```
+
+The profile replaces the Gaussian `--ghost-sigma` scales by default; give
+`--ghost-sigma` explicitly as well to search for both the profile and the
+generic shapes. The profile's amplitude is not fixed: the signal-to-noise ratio
+scales linearly with intensity, so a fainter or brighter copy is still found.
+Its apparent size can change, so `--profile-scale` tries several multipliers of
+the profile radius. The default is `0.75,1,1.25`; multipliers below 0.75 are
+available but tend to match compact stars and other sharp residuals. Use
+`--profile-file` to read a profile from somewhere other than
+`<output>/<filter>/artefact.npe`.
+
+A profile score is not on the same scale as a Gaussian score. The compact
+profile kernel usually gives much larger `snr` values, and the small-scale
+multipliers are sensitive to compact residuals. `--max-peak-ratio` (default 15)
+rejects a candidate whose local peak sits more than that multiple above its
+matched amplitude, which removes stars and sharp defects. Start with a higher
+`--min-snr` than you used for the Gaussian scan and inspect `artefacts.csv`
+before feeding it to `annotate` or `union`.
+
 Examples (from `output/cmd/L_scan.sh` and `output/cmd/B_scan.sh`):
 
 ```
@@ -182,7 +208,11 @@ Main options:
 | `--min-snr` | Significance at which a feature is catalogued, and the threshold that decides which clean frames are too close to the cut-off to trust (see `--clean-margin`). It does not have to equal the value used by `detect`. |
 | `--clean-margin` | Skips clean frames whose peak is dangerously close to `--min-snr`, so a faint artefact does not contaminate the clean master. |
 | `--polarity` | `both` reports bright and dark artefacts. `positive` and `negative` keep one sign only; the example scripts use `positive`. |
-| `--ghost-sigma` | Sizes searched for. The scripts use `8` because all ghosts in this data are similar in size. |
+| `--ghost-sigma` | Sizes searched for. The scripts use `8` because all ghosts in this data are similar in size. Ignored when `--profile` is used, unless given explicitly. |
+| `--profile` | Reuse `<output>/<filter>/artefact.npe` as a matched filter. |
+| `--profile-file` | Use a specific `.npe` profile instead of the default path. |
+| `--profile-scale` | Profile size multipliers, default `0.75,1,1.25`. |
+| `--max-peak-ratio` | Reject profile candidates whose local peak exceeds this multiple of their matched amplitude, default 15. `0` disables. |
 | `--margin` | Width in pixels of the image border excluded from the scan. |
 | `--corner` | Size of the square ignored at each corner. Defaults to 80; `0` disables it. |
 | `--star-halo` | Radius around a star whose halo is ignored. `0` disables halo rejection. |
@@ -496,6 +526,9 @@ and noise are recorded in `background.csv`.
 | `--clean-margin` | 0.2 | Scan refuses to find two clean frames. |
 | `--polarity` | both | You only care about bright (positive) or dark (negative) ghosts. |
 | `--ghost-sigma` | 4,8,16 | Artefacts are consistently larger or smaller. |
+| `--profile` | off | You want to catalogue the shape measured by `detect --dirty`. |
+| `--profile-scale` | 0.75,1,1.25 | The same shape appears at clearly different sizes. |
+| `--max-peak-ratio` | 15 | Lower it to reject sharper candidates; raise it to keep more. |
 | `--margin` | 64 | A real artefact sits near the edge of the frame. |
 | `--corner` | 80 | A real artefact sits in a corner, or corner false positives remain. |
 | `--star-halo` | 220 | Star haloes are still catalogued, or a real artefact near a bright star disappears. |
@@ -519,6 +552,11 @@ The frame directory name does not contain `_FILTER-L_` or similar. Pass
 `scan` reads the names from the report produced by `detect`, and those files
 must be present in the directory you pass to `scan`. Use the same input for
 both, or copy the report to the location that matches.
+
+**"no artefact profile at …; run detect --dirty or pass --profile-file"**
+`scan --profile` looks for `output/<filter>/artefact.npe`. Run
+`detect --dirty` first, or give the profile location with `--profile-file`.
+If you do not want profile matching, omit `--profile`.
 
 **"detection report has N usable clean frames, need at least 2"**
 Too few frames were classified as clean. Lower `--min-snr` in `scan`, raise

@@ -159,6 +159,67 @@ func ExtractProfile(frame, ref []float32, w, h int, opts ProfileOptions) (Profil
 	}, nil
 }
 
+// Scaled returns a copy of the profile resampled by factor. A factor below one
+// shrinks the kernel, a factor above one enlarges it. The result is normalised
+// to sum one and keeps the source metadata.
+func (p Profile) Scaled(factor float64) (Profile, error) {
+	if factor <= 0 || !finite(factor) {
+		return Profile{}, fmt.Errorf("profile scale must be positive, got %v", factor)
+	}
+	if err := p.validate(); err != nil {
+		return Profile{}, err
+	}
+
+	srcSide := 2*p.Radius + 1
+	radius := int(math.Round(float64(p.Radius) * factor))
+	if radius < 1 {
+		radius = 1
+	}
+	side := 2*radius + 1
+	kernel := make([]float64, side*side)
+	for y := 0; y < side; y++ {
+		sy := (float64(y-radius))/factor + float64(p.Radius)
+		for x := 0; x < side; x++ {
+			sx := (float64(x-radius))/factor + float64(p.Radius)
+			kernel[y*side+x] = bilinearSample(p.Kernel, srcSide, sx, sy)
+		}
+	}
+
+	var sum float64
+	for _, v := range kernel {
+		if v < 0 || !finite(v) {
+			return Profile{}, errors.New("scaled profile has a negative or non-finite sample")
+		}
+		sum += v
+	}
+	if sum <= 0 {
+		return Profile{}, errors.New("scaled profile is empty")
+	}
+	for i := range kernel {
+		kernel[i] /= sum
+	}
+
+	out := p
+	out.Radius = radius
+	out.Kernel = kernel
+	return out, nil
+}
+
+// bilinearSample reads a square kernel at a fractional position. Points
+// outside the kernel contribute zero, which matches the zero padding used by
+// the whole-image filter.
+func bilinearSample(kernel []float64, side int, x, y float64) float64 {
+	if x < 0 || y < 0 || x > float64(side-1) || y > float64(side-1) {
+		return 0
+	}
+	x0, y0 := int(math.Floor(x)), int(math.Floor(y))
+	x1, y1 := min(x0+1, side-1), min(y0+1, side-1)
+	tx, ty := x-float64(x0), y-float64(y0)
+	top := kernel[y0*side+x0]*(1-tx) + kernel[y0*side+x1]*tx
+	bottom := kernel[y1*side+x0]*(1-tx) + kernel[y1*side+x1]*tx
+	return top*(1-ty) + bottom*ty
+}
+
 // validate checks a profile supplied to Score. The kernel need not be
 // normalised; Score normalises a copy.
 func (p *Profile) validate() error {
