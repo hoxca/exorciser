@@ -29,11 +29,11 @@ const (
 	eraseDefaultInput        = "img/registered"
 	eraseDefaultOutput       = "output/registered"
 	eraseDefaultProducts     = "output"
-	eraseDefaultRadius       = 20
+	eraseDefaultRadius       = 12
 	eraseDefaultFeather      = 4
 	eraseDefaultSearchRadius = 24
 	eraseDefaultSearchGuard  = 4
-	eraseDefaultRadiusScale  = 2.5
+	eraseDefaultRadiusScale  = 1.25
 	eraseDefaultMinSNR       = 6
 	inpaintReportName        = "inpaint.csv"
 )

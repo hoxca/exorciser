@@ -374,7 +374,8 @@ threshold recorded in `detect.json`, that artefact is skipped. Use
 `--min-snr` to override the stored threshold.
 
 The repaired disc starts at `--radius` and grows with `ghost_sigma` according
-to `--radius-scale`. The frame's local sky is modelled with a first-order
+to `--radius-scale`. With the defaults, a `ghost_sigma` of 10 gives a 13 px
+disc plus the 4 px feather. The frame's local sky is modelled with a first-order
 plane, the clean structure is scaled by the frame-to-clean affine slope, and
 Gaussian noise is added to match the local noise. The local annulus excludes
 star-mask pixels; if it is much noisier than the global background, the global
@@ -419,8 +420,8 @@ Main options:
 | `--background` | Background window record, when it is not the default. |
 | `--clean` | Clean master to use as reference. |
 | `--detection` | Detection report deciding which frames are modified. |
-| `--radius` | Minimum radius of the repaired disc, default 20 pixels. |
-| `--radius-scale` | Per-artefact radius multiplier of `ghost_sigma`, default 2.5; `0` keeps `--radius` fixed. |
+| `--radius` | Minimum radius of the repaired disc, default 12 pixels. |
+| `--radius-scale` | Per-artefact radius multiplier of `ghost_sigma`, default 1.25; `0` keeps `--radius` fixed. |
 | `--feather` | Blend width inside the rim, default 4 pixels. |
 | `--search-radius` | Circular radius searched around each catalogue position, default 24 pixels. |
 | `--search-guard` | Peaks within this distance of the search radius are rejected, default 4 pixels. |
