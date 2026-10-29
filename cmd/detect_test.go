@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -571,4 +572,38 @@ func detectionColumnIndex(t *testing.T, name string) int {
 	}
 	t.Fatalf("no %q column in detection header", name)
 	return -1
+}
+
+func TestWriteDetectMetadata(t *testing.T) {
+	dir := t.TempDir()
+	p := detect.Profile{Radius: 16}
+	opts := &detectOptions{
+		minSNR:        6.15,
+		window:        64,
+		margin:        64,
+		coord:         &point{x: 2467, y: 1970},
+		scales:        []float64{4, 8},
+		profileRadius: 16,
+		profile:       &p,
+	}
+	if err := writeDetectMetadata(dir, "L", opts, "ref.xisf", "dirty.xisf"); err != nil {
+		t.Fatalf("writeDetectMetadata: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, detectMetadataName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got detectMetadata
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Version != 1 || got.Filter != "L" || got.MinSNR != 6.15 ||
+		got.Window != 64 || got.Margin != 64 || got.Coord != "2467,1970" ||
+		got.ProfileRadius != 16 || !got.ProfileUsed ||
+		got.Reference != "ref.xisf" || got.Dirty != "dirty.xisf" {
+		t.Errorf("metadata = %+v", got)
+	}
+	if len(got.GhostSigma) != 2 || got.GhostSigma[0] != 4 || got.GhostSigma[1] != 8 {
+		t.Errorf("ghost sigma = %v, want [4 8]", got.GhostSigma)
+	}
 }

@@ -57,6 +57,12 @@ type Options struct {
 	// own shape, and a compact ghost's core can exceed the Gaussian clip. The
 	// Gaussian scales keep the stricter clip so a star's wings do not dominate.
 	ProfileClipSigma float64
+	// Affine, when set, is used instead of fitting frame to ref. This lets a
+	// caller fit once and run many local measurements.
+	Affine *Affine
+	// Mask marks full-image pixels to exclude, typically a star mask. A nil
+	// mask excludes nothing.
+	Mask []bool
 }
 
 // Result describes the strongest brighter-than-reference feature found in the
@@ -355,7 +361,7 @@ func collectRing(w int, g ring, sample func(i int) (float64, bool)) (us, vs, zs 
 // prepare fits the affine transform and background, then builds the clipped,
 // masked residual over a square that extends kernelRadius pixels beyond win.
 // The background ring is the margin-wide border outside that square.
-func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, stride int, clipSigma float64) (prepared, error) {
+func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, stride int, clipSigma float64, affine *Affine, mask []bool) (prepared, error) {
 	if clipSigma <= 0 || !finite(clipSigma) {
 		return prepared{}, fmt.Errorf("clip sigma must be positive, got %v", clipSigma)
 	}
@@ -365,9 +371,15 @@ func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, s
 		return prepared{}, err
 	}
 
-	aff, err := Fit(frame, ref, w, h, stride)
-	if err != nil {
-		return prepared{}, err
+	var aff Affine
+	if affine != nil {
+		aff = *affine
+	} else {
+		var err error
+		aff, err = Fit(frame, ref, w, h, stride)
+		if err != nil {
+			return prepared{}, err
+		}
 	}
 
 	us, vs, zs, err := collectRing(w, g, func(i int) (float64, bool) {
@@ -401,6 +413,10 @@ func prepare(frame, ref []float32, w, h int, win Window, kernelRadius, margin, s
 		base := j * g.ext
 		for i := 0; i < g.ext; i++ {
 			x := g.x0 + i
+			if mask != nil && mask[y*w+x] {
+				masked++
+				continue
+			}
 			f := float64(frame[line+x])
 			r := float64(ref[line+x])
 			if !finite(f) || !finite(r) {
@@ -492,8 +508,11 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 	if opts.Margin <= maxRadius {
 		return Result{}, fmt.Errorf("margin %d must exceed the kernel radius %d", opts.Margin, maxRadius)
 	}
+	if opts.Mask != nil && len(opts.Mask) < w*h {
+		return Result{}, errors.New("mask is smaller than the image")
+	}
 
-	prep, err := prepare(frame, ref, w, h, win, maxRadius, opts.Margin, opts.Stride, opts.ClipSigma)
+	prep, err := prepare(frame, ref, w, h, win, maxRadius, opts.Margin, opts.Stride, opts.ClipSigma, opts.Affine, opts.Mask)
 	if err != nil {
 		return Result{}, err
 	}
@@ -543,7 +562,7 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 	if opts.Profile != nil {
 		profilePrep := prep
 		if opts.ProfileClipSigma != opts.ClipSigma {
-			profilePrep, err = prepare(frame, ref, w, h, win, maxRadius, opts.Margin, opts.Stride, opts.ProfileClipSigma)
+			profilePrep, err = prepare(frame, ref, w, h, win, maxRadius, opts.Margin, opts.Stride, opts.ProfileClipSigma, opts.Affine, opts.Mask)
 			if err != nil {
 				return Result{}, err
 			}

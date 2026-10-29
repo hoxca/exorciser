@@ -197,3 +197,37 @@ func TestInpaintRejectsBadArguments(t *testing.T) {
 		t.Error("Inpaint accepted a nil noise source")
 	}
 }
+
+func TestRingStatsLeavesArtefactOut(t *testing.T) {
+	const w, h = 220, 220
+	plane := sky(w, h, 0.01, 0.001, 12)
+	// A bright blob in the middle must not affect the annulus measurement.
+	for y := 90; y < 130; y++ {
+		for x := 90; x < 130; x++ {
+			plane[y*w+x] = 0.5
+		}
+	}
+	st, err := erase.RingStats(plane, w, h, 110, 110, 30, 45)
+	if err != nil {
+		t.Fatalf("RingStats: %v", err)
+	}
+	if math.Abs(st.Mean-0.01) > 0.0002 {
+		t.Errorf("mean = %v, want about 0.01", st.Mean)
+	}
+	if math.Abs(st.Noise-0.001) > 0.0002 {
+		t.Errorf("noise = %v, want about 0.001", st.Noise)
+	}
+	if st.Pixels == 0 {
+		t.Error("RingStats returned no pixels")
+	}
+}
+
+func TestRingStatsRejectsBadAnnulus(t *testing.T) {
+	plane := sky(200, 200, 0.01, 0.001, 13)
+	if _, err := erase.RingStats(plane, 200, 200, 100, 100, 40, 30); err == nil {
+		t.Error("RingStats accepted inner > outer")
+	}
+	if _, err := erase.RingStats(plane, 200, 200, 10, 100, 20, 30); err == nil {
+		t.Error("RingStats accepted an annulus crossing the border")
+	}
+}

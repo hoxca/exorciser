@@ -81,7 +81,7 @@ func ExtractProfile(frame, ref []float32, w, h int, opts ProfileOptions) (Profil
 
 	side := 2*opts.Radius + 1
 	win := At(opts.X, opts.Y, side)
-	prep, err := prepare(frame, ref, w, h, win, opts.Radius, opts.Margin, opts.Stride, opts.ClipSigma)
+	prep, err := prepare(frame, ref, w, h, win, opts.Radius, opts.Margin, opts.Stride, opts.ClipSigma, nil, nil)
 	if err != nil {
 		return Profile{}, err
 	}

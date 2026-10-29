@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,25 @@ import (
 
 // detectionName is the file written inside the output directory.
 const detectionName = "detection.csv"
+
+// detectMetadataName records the settings that produced detection.csv, so
+// later stages can reuse the same detection threshold.
+const detectMetadataName = "detect.json"
+
+// detectMetadata is written beside detection.csv.
+type detectMetadata struct {
+	Version       int       `json:"version"`
+	Filter        string    `json:"filter"`
+	MinSNR        float64   `json:"min_snr"`
+	Window        int       `json:"window"`
+	Margin        int       `json:"margin"`
+	Coord         string    `json:"coord,omitempty"`
+	GhostSigma    []float64 `json:"ghost_sigma"`
+	ProfileRadius int       `json:"profile_radius"`
+	ProfileUsed   bool      `json:"profile_used"`
+	Reference     string    `json:"reference"`
+	Dirty         string    `json:"dirty,omitempty"`
+}
 
 type detectOptions struct {
 	input     string
@@ -135,8 +155,10 @@ structure common to every row belongs to the reference.
 The filter is read from the input directory. A directory ending in
 _FILTER-L_mono selects L; L, R, G, B, S, H and O are recognised. Use --filter to
 select one filter from a parent directory. A run processes one filter at a time
-and writes its report to <output>/<filter>/detection.csv. The report is
-semicolon-delimited and uses a decimal comma.`,
+and writes its report to <output>/<filter>/detection.csv. The settings used,
+including --min-snr, are saved in <output>/<filter>/detect.json so erase can
+reuse the same localisation threshold. The report is semicolon-delimited and
+uses a decimal comma.`,
 		Example: `  exorciser detect --reference 011 --dirty 003 --dirty-coord 2463,1989 --coord 2454,1990 --filter B`,
 		Args:    cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -515,6 +537,9 @@ func runDetect(ctx context.Context, roots []string, opts *detectOptions) error {
 	if err := writeDetections(outDir, rows); err != nil {
 		return err
 	}
+	if err := writeDetectMetadata(outDir, filter, opts, refPath, dirtyPath); err != nil {
+		return err
+	}
 
 	var analysed, failed, detected int
 	for _, r := range rows {
@@ -812,6 +837,39 @@ func logDetection(r report.Row) {
 		"peak_x", r.PeakX,
 		"peak_y", r.PeakY,
 		"ms", r.DurationMS)
+}
+
+// writeDetectMetadata records the settings used for this run.
+func writeDetectMetadata(dir, filter string, opts *detectOptions, refPath, dirtyPath string) error {
+	coord := ""
+	if opts.coord != nil {
+		coord = fmt.Sprintf("%d,%d", opts.coord.x, opts.coord.y)
+	}
+	meta := detectMetadata{
+		Version:       1,
+		Filter:        filter,
+		MinSNR:        opts.minSNR,
+		Window:        opts.window,
+		Margin:        opts.margin,
+		Coord:         coord,
+		GhostSigma:    opts.scales,
+		ProfileRadius: opts.profileRadius,
+		ProfileUsed:   opts.profile != nil,
+		Reference:     filepath.Base(refPath),
+	}
+	if dirtyPath != "" {
+		meta.Dirty = filepath.Base(dirtyPath)
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", detectMetadataName, err)
+	}
+	data = append(data, '\n')
+	path := filepath.Join(dir, detectMetadataName)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }
 
 // writeDetections writes rows to detection.csv inside dir, creating dir if

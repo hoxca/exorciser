@@ -3,17 +3,22 @@ package cmd
 import (
 	"context"
 	"encoding/binary"
+	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/hoxca/exorciser/internal/detect"
 	"github.com/hoxca/exorciser/internal/erase"
 	"github.com/hoxca/exorciser/internal/report"
 	"github.com/hoxca/xisf"
@@ -21,26 +26,33 @@ import (
 )
 
 const (
-	eraseDefaultInput    = "img/registered"
-	eraseDefaultOutput   = "output/registered"
-	eraseDefaultProducts = "output"
-	eraseDefaultRadius   = 32
-	eraseDefaultFeather  = 6
+	eraseDefaultInput        = "img/registered"
+	eraseDefaultOutput       = "output/registered"
+	eraseDefaultProducts     = "output"
+	eraseDefaultRadius       = 20
+	eraseDefaultFeather      = 4
+	eraseDefaultSearchRadius = 24
+	eraseDefaultRadiusScale  = 2.5
+	eraseDefaultMinSNR       = 6
+	inpaintReportName        = "inpaint.csv"
 )
 
 type eraseOptions struct {
-	input      string
-	output     string
-	filter     string
-	products   string
-	artefacts  string
-	background string
-	clean      string
-	detection  string
-	radius     int
-	feather    int
-	workers    int
-	inplace    bool
+	input        string
+	output       string
+	filter       string
+	products     string
+	artefacts    string
+	background   string
+	clean        string
+	detection    string
+	radius       int
+	feather      int
+	searchRadius int
+	radiusScale  float64
+	minSNR       float64
+	workers      int
+	inplace      bool
 }
 
 func newEraseCmd() *cobra.Command {
@@ -65,15 +77,25 @@ The union catalogue defaults to <products>/<filters>/artefacts.csv, where
 background window is read from background.csv in that directory, and the clean
 master from <products>/<filter>/<filter>_stack_clean.xisf.
 
-For each artefact, a disc of --radius pixels around its centre is replaced by
-the matching part of the clean master. The clean samples are shifted onto the
-frame's sky level and Gaussian noise is added to bring the patch up to the
-frame's noise, both measured in the background window. A --feather pixel blend
-inside the rim hides the transition. The added noise is seeded from the frame
-name and artefact number, so the result is reproducible.
+The catalogue position is only a starting point. For every artefact in a
+detected frame, erase searches --search-radius pixels around it with a matched
+filter built from the filter's artefact.npe profile, or from a Gaussian at the
+catalogue ghost_sigma when no profile exists. The frame is fitted to the clean
+master once, and each local window gets its own background plane and star mask.
+An artefact is skipped when its local peak_snr is below the detection threshold
+stored by detect in detect.json; use --min-snr to override it.
 
-Passing clouds invalidate the background sample: the resulting gradient leaves
-a visible disc.
+Each repaired disc starts at --radius and grows with ghost_sigma according to
+--radius-scale, so a large artefact is not clipped. The clean samples are
+shifted onto the frame's local sky level and Gaussian noise is added to match
+the local noise. A --feather pixel blend inside the rim hides the transition.
+The added noise is seeded from the frame name and artefact number, so the
+result is reproducible.
+
+A per-artefact report is written to <products>/<filter>/inpaint.csv.
+
+Passing clouds invalidate the local background sample: the resulting gradient
+leaves a visible disc.
 
 Output defaults to output/registered/<filter>/.`,
 		Args: cobra.ArbitraryArgs,
@@ -110,9 +132,15 @@ Output defaults to output/registered/<filter>/.`,
 	flags.StringVar(&opts.detection, "detection", "",
 		"detection report deciding which frames are modified (default <products>/<filter>/"+detectionName+")")
 	flags.IntVar(&opts.radius, "radius", eraseDefaultRadius,
-		"radius in pixels of the disc erased around each artefact")
+		"minimum radius in pixels of the disc erased around each artefact")
+	flags.Float64Var(&opts.radiusScale, "radius-scale", eraseDefaultRadiusScale,
+		"per-artefact radius multiplier of ghost_sigma; 0 keeps --radius fixed")
 	flags.IntVar(&opts.feather, "feather", eraseDefaultFeather,
 		"blend width in pixels inside the disc rim")
+	flags.IntVar(&opts.searchRadius, "search-radius", eraseDefaultSearchRadius,
+		"radius in pixels searched around each catalogue position")
+	flags.Float64Var(&opts.minSNR, "min-snr", 0,
+		"local detection threshold (default: read from detect.json)")
 	flags.IntVarP(&opts.workers, "workers", "j", 4,
 		"number of frames decoded and written concurrently")
 	flags.BoolVar(&opts.inplace, "inplace", false,
@@ -139,10 +167,33 @@ func (o *eraseOptions) validate() error {
 		return fmt.Errorf("--feather must be between 0 and the radius %d, got %d",
 			o.radius, o.feather)
 	}
+	if o.searchRadius < 0 {
+		return fmt.Errorf("--search-radius must not be negative, got %d", o.searchRadius)
+	}
+	if o.radiusScale < 0 || math.IsNaN(o.radiusScale) || math.IsInf(o.radiusScale, 0) {
+		return fmt.Errorf("--radius-scale must not be negative, got %v", o.radiusScale)
+	}
+	if o.minSNR < 0 || math.IsNaN(o.minSNR) || math.IsInf(o.minSNR, 0) {
+		return fmt.Errorf("--min-snr must not be negative, got %v", o.minSNR)
+	}
 	if o.workers < 1 {
 		return fmt.Errorf("--workers must be positive, got %d", o.workers)
 	}
 	return nil
+}
+
+// inpaintRecord is one localisation and repair decision for inpaint.csv.
+type inpaintRecord struct {
+	Frame      string
+	Artefact   int
+	CatalogueX int
+	CatalogueY int
+	FoundX     int
+	FoundY     int
+	SNR        float64
+	Radius     int
+	Applied    bool
+	Reason     string
 }
 
 func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
@@ -183,6 +234,15 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 		detectionPath = filepath.Join(products, filter, detectionName)
 	}
 
+	minSNR, err := resolveEraseMinSNR(products, filter, opts.minSNR)
+	if err != nil {
+		return err
+	}
+	baseProfile, err := readEraseProfile(products, filter)
+	if err != nil {
+		return err
+	}
+
 	artefacts, err := readArtefactsFile(artefactsPath)
 	if err != nil {
 		return err
@@ -205,6 +265,13 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 	cleanStats, err := erase.WindowStats(cleanPlane, w, h, background.X, background.Y, background.Size)
 	if err != nil {
 		return fmt.Errorf("measure clean master background: %w", err)
+	}
+	starMask, err := detect.StarMask(cleanPlane, w, h, detect.StarMaskOptions{
+		Sigma:    50,
+		Dilation: 4,
+	})
+	if err != nil {
+		return fmt.Errorf("build star mask: %w", err)
 	}
 
 	detected := make(map[string]bool, len(rows))
@@ -240,12 +307,18 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 		"filter", filter,
 		"frames", len(paths),
 		"artefacts", len(artefacts),
+		"min_snr", minSNR,
+		"search_radius", opts.searchRadius,
+		"radius", opts.radius,
+		"radius_scale", opts.radiusScale,
+		"profile", baseProfile != nil,
 		"inplace", opts.inplace,
 		"background", backgroundPath,
 		"clean", cleanPath)
 
 	errs := make([]error, len(paths))
 	modified := make([]bool, len(paths))
+	records := make([][]inpaintRecord, len(paths))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	for range max(1, min(opts.workers, len(paths))) {
@@ -253,8 +326,8 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				modified[i], errs[i] = eraseFrame(ctx, paths[i], outDir, detected,
-					w, h, cleanPlane, cleanStats, background, artefacts, opts)
+				modified[i], records[i], errs[i] = eraseFrame(ctx, paths[i], outDir, detected,
+					w, h, cleanPlane, cleanStats, background, artefacts, starMask, baseProfile, minSNR, opts)
 			}
 		}()
 	}
@@ -277,10 +350,26 @@ feed:
 			return fmt.Errorf("%s: %w", filepath.Base(paths[i]), err)
 		}
 	}
+
+	reportPath := filepath.Join(products, filter, inpaintReportName)
+	var all []inpaintRecord
+	for _, rs := range records {
+		all = append(all, rs...)
+	}
+	if err := writeInpaintReport(reportPath, all); err != nil {
+		return err
+	}
+
 	erased := 0
 	for _, ok := range modified {
 		if ok {
 			erased++
+		}
+	}
+	applied := 0
+	for _, rec := range all {
+		if rec.Applied {
+			applied++
 		}
 	}
 	done := []any{
@@ -289,6 +378,8 @@ feed:
 		"erased", erased,
 		"unchanged", len(paths) - erased,
 		"artefacts", len(artefacts),
+		"applied", applied,
+		"report", reportPath,
 	}
 	if opts.inplace {
 		done = append(done, "inplace", true)
@@ -299,10 +390,55 @@ feed:
 	return nil
 }
 
-// eraseFrame copies a clean frame or inpaints every artefact in a detected one.
+// resolveEraseMinSNR returns the explicit threshold, the one persisted by
+// detect, or the compatibility default.
+func resolveEraseMinSNR(products, filter string, override float64) (float64, error) {
+	if override > 0 {
+		return override, nil
+	}
+	path := filepath.Join(products, filter, detectMetadataName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Warn("detect.json not found; using compatibility threshold",
+				"path", path, "min_snr", eraseDefaultMinSNR)
+			return eraseDefaultMinSNR, nil
+		}
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	var meta detectMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return 0, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if meta.MinSNR <= 0 || math.IsNaN(meta.MinSNR) || math.IsInf(meta.MinSNR, 0) {
+		return 0, fmt.Errorf("%s has invalid min_snr %v", path, meta.MinSNR)
+	}
+	slog.Info("detect settings loaded", "path", path, "min_snr", meta.MinSNR)
+	return meta.MinSNR, nil
+}
+
+// readEraseProfile loads the filter's saved matched-filter profile when one
+// exists. Missing files fall back to a Gaussian at each catalogue scale.
+func readEraseProfile(products, filter string) (*detect.Profile, error) {
+	path := filepath.Join(products, filter, artefactProfileNPE)
+	p, err := readArtefactProfile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Warn("artefact profile not found; using Gaussian localisation", "path", path)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read artefact profile %s: %w", path, err)
+	}
+	return &p, nil
+}
+
+// eraseFrame copies an undetected frame or locates and repairs every catalogue
+// artefact in a detected one.
 func eraseFrame(ctx context.Context, src, outDir string, detected map[string]bool,
 	w, h int, cleanPlane []float32, cleanStats erase.Stats,
-	background report.Background, artefacts []report.Artefact, opts *eraseOptions) (bool, error) {
+	background report.Background, artefacts []report.Artefact,
+	starMask []bool, baseProfile *detect.Profile, minSNR float64, opts *eraseOptions,
+) (bool, []inpaintRecord, error) {
 	name := filepath.Base(src)
 	dest := filepath.Join(outDir, name)
 	if opts.inplace {
@@ -310,63 +446,255 @@ func eraseFrame(ctx context.Context, src, outDir string, detected map[string]boo
 	}
 	if !detected[name] {
 		if opts.inplace {
-			return false, nil
+			return false, nil, nil
 		}
-		return false, copyFile(src, dest)
+		return false, nil, copyFile(src, dest)
 	}
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return false, nil, err
 	}
 
 	var mode os.FileMode
 	if opts.inplace {
 		info, err := os.Stat(src)
 		if err != nil {
-			return false, err
+			return false, nil, err
 		}
 		mode = info.Mode().Perm()
 	}
 
 	plane, fw, fh, err := loadPlane(src)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if fw != w || fh != h {
-		return false, fmt.Errorf("frame is %d×%d but the clean master is %d×%d", fw, fh, w, h)
+		return false, nil, fmt.Errorf("frame is %d×%d but the clean master is %d×%d", fw, fh, w, h)
 	}
-	targetStats, err := erase.WindowStats(plane, w, h, background.X, background.Y, background.Size)
+
+	affine, err := detect.Fit(plane, cleanPlane, w, h, 8)
 	if err != nil {
-		return false, fmt.Errorf("measure frame background: %w", err)
+		slog.Warn("frame normalisation failed; using identity", "file", name, "err", err)
+		affine = detect.Affine{A: 1, B: 0}
 	}
-	cal := erase.Calibration{
-		TargetMean:  targetStats.Mean,
-		TargetNoise: targetStats.Noise,
-		CleanMean:   cleanStats.Mean,
-		CleanNoise:  cleanStats.Noise,
+	targetGlobal, err := erase.WindowStats(plane, w, h, background.X, background.Y, background.Size)
+	if err != nil {
+		return false, nil, fmt.Errorf("measure frame background: %w", err)
 	}
+
+	var records []inpaintRecord
+	applied := 0
 	for i, a := range artefacts {
-		rng := rand.New(rand.NewSource(eraseSeed(name, i)))
-		if err := erase.Inpaint(plane, cleanPlane, w, h, a.X, a.Y,
-			opts.radius, opts.feather, cal, rng); err != nil {
-			return false, fmt.Errorf("artefact %d at (%d,%d): %w", a.N, a.X, a.Y, err)
+		rec := inpaintRecord{
+			Frame:      name,
+			Artefact:   a.N,
+			CatalogueX: a.X,
+			CatalogueY: a.Y,
 		}
+		result, radius, err := locateArtefact(plane, cleanPlane, w, h, a, affine,
+			starMask, baseProfile, opts)
+		if err != nil {
+			rec.Reason = err.Error()
+			records = append(records, rec)
+			continue
+		}
+		rec.FoundX, rec.FoundY = result.PeakX, result.PeakY
+		rec.SNR = result.PeakSNR
+		rec.Radius = radius
+		if result.PeakSNR < minSNR {
+			rec.Reason = "below min-snr"
+			records = append(records, rec)
+			continue
+		}
+
+		targetStats, cleanLocal := targetGlobal, cleanStats
+		inner := radius + opts.feather + 2
+		outer := inner + 16
+		if st, err := erase.RingStats(plane, w, h, result.PeakX, result.PeakY, inner, outer); err == nil {
+			targetStats = st
+		} else {
+			slog.Debug("local target annulus failed; using global background",
+				"file", name, "artefact", a.N, "err", err)
+		}
+		if st, err := erase.RingStats(cleanPlane, w, h, result.PeakX, result.PeakY, inner, outer); err == nil {
+			cleanLocal = st
+		} else {
+			slog.Debug("local clean annulus failed; using global background",
+				"file", name, "artefact", a.N, "err", err)
+		}
+		cal := erase.Calibration{
+			TargetMean:  targetStats.Mean,
+			TargetNoise: targetStats.Noise,
+			CleanMean:   cleanLocal.Mean,
+			CleanNoise:  cleanLocal.Noise,
+		}
+		rng := rand.New(rand.NewSource(eraseSeed(name, i)))
+		if err := erase.Inpaint(plane, cleanPlane, w, h, result.PeakX, result.PeakY,
+			radius, opts.feather, cal, rng); err != nil {
+			return false, nil, fmt.Errorf("artefact %d at (%d,%d): %w",
+				a.N, result.PeakX, result.PeakY, err)
+		}
+		rec.Applied = true
+		applied++
+		records = append(records, rec)
+	}
+
+	if applied == 0 {
+		if opts.inplace {
+			return false, records, nil
+		}
+		return false, records, copyFile(src, dest)
 	}
 	if err := writeErasedFrame(dest, src, plane); err != nil {
-		return false, err
+		return false, records, err
 	}
 	if opts.inplace {
 		// WriteFile creates its temporary file with mode 0600; restore the
 		// source permissions that the rename replaced.
 		if err := os.Chmod(dest, mode); err != nil {
-			return false, err
+			return false, records, err
 		}
 	}
 	slog.Debug("frame erased",
 		"file", name,
-		"artefacts", len(artefacts),
-		"mean", targetStats.Mean,
-		"noise", targetStats.Noise)
-	return true, nil
+		"artefacts", applied,
+		"mean", targetGlobal.Mean,
+		"noise", targetGlobal.Noise)
+	return true, records, nil
+}
+
+// localiseWindow picks the largest local window and background margin that
+// fit around the catalogue position. Near an image edge it shrinks the window
+// and the search radius rather than skipping a real artefact.
+func localiseWindow(x, y, w, h, maxRadius, search int) (detect.Window, int, int, error) {
+	for _, size := range []int{64, 48, 32, 24} {
+		win := detect.At(x, y, size)
+		if err := win.Validate(w, h); err != nil {
+			continue
+		}
+		margins := []int{64, 48, 32, maxRadius + 1}
+		for _, margin := range margins {
+			if margin <= maxRadius {
+				continue
+			}
+			if win.X-margin < 0 || win.Y-margin < 0 ||
+				win.X+win.Size+margin > w || win.Y+win.Size+margin > h {
+				continue
+			}
+			searchHere := min(search, size/2)
+			if searchHere < 0 {
+				searchHere = 0
+			}
+			return win, margin, searchHere, nil
+		}
+	}
+	return detect.Window{}, 0, 0, errors.New("no local window fits around the catalogue position")
+}
+
+// locateArtefact finds one catalogue artefact in the frame around its
+// catalogue position. The profile is scaled so its equivalent Gaussian sigma
+// matches the catalogue ghost_sigma.
+func locateArtefact(frame, clean []float32, w, h int, a report.Artefact,
+	affine detect.Affine, starMask []bool, baseProfile *detect.Profile,
+	opts *eraseOptions,
+) (detect.Result, int, error) {
+	scale := a.Scale
+	if scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
+		scale = 8
+	}
+	maxRadius := detect.MaxKernelRadius([]float64{scale})
+	var scaledProfile *detect.Profile
+	if baseProfile != nil {
+		baseSigma := float64(baseProfile.Radius) / 2
+		factor := 1.0
+		if baseSigma > 0 {
+			factor = scale / baseSigma
+		}
+		if profile, err := baseProfile.Scaled(factor); err == nil {
+			scaledProfile = &profile
+			maxRadius = max(maxRadius, profile.Radius)
+		}
+	}
+
+	win, margin, search, err := localiseWindow(a.X, a.Y, w, h, maxRadius, opts.searchRadius)
+	if err != nil {
+		return detect.Result{}, 0, err
+	}
+	scoreOpts := detect.Options{
+		Window:           win,
+		Margin:           margin,
+		Scales:           []float64{scale},
+		SearchRadius:     search,
+		Affine:           &affine,
+		Mask:             starMask,
+		Stride:           8,
+		ClipSigma:        100,
+		ProfileClipSigma: 100,
+	}
+	if scaledProfile != nil {
+		scoreOpts.Profile = scaledProfile
+	}
+	result, err := detect.Score(frame, clean, w, h, scoreOpts)
+	if err != nil {
+		return detect.Result{}, 0, err
+	}
+	return result, artefactRadius(scale, opts.radius, opts.radiusScale), nil
+}
+
+// artefactRadius applies the per-artefact size scale, keeping --radius as the
+// minimum for small features.
+func artefactRadius(scale float64, minimum int, factor float64) int {
+	if factor <= 0 || scale <= 0 {
+		return minimum
+	}
+	r := int(math.Ceil(factor * scale))
+	if r < minimum {
+		r = minimum
+	}
+	return r
+}
+
+// writeInpaintReport writes the per-frame localisation decisions.
+func writeInpaintReport(path string, records []inpaintRecord) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create inpaint report: %w", err)
+	}
+	cw := csv.NewWriter(f)
+	cw.Comma = report.Separator
+	header := []string{"frame", "artefact", "catalogue_x", "catalogue_y",
+		"found_x", "found_y", "snr", "radius", "applied", "reason"}
+	if err := cw.Write(header); err != nil {
+		_ = f.Close()
+		return err
+	}
+	for _, r := range records {
+		row := []string{
+			r.Frame,
+			strconv.Itoa(r.Artefact),
+			strconv.Itoa(r.CatalogueX),
+			strconv.Itoa(r.CatalogueY),
+			strconv.Itoa(r.FoundX),
+			strconv.Itoa(r.FoundY),
+			formatReportFloat(r.SNR),
+			strconv.Itoa(r.Radius),
+			strconv.FormatBool(r.Applied),
+			r.Reason,
+		}
+		if err := cw.Write(row); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func formatReportFloat(v float64) string {
+	return strings.ReplaceAll(strconv.FormatFloat(v, 'f', 3, 64), ".", string(report.DecimalSeparator))
 }
 
 // writeErasedFrame writes plane with the source frame's header properties.

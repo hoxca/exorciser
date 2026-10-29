@@ -79,6 +79,71 @@ func WindowStats(plane []float32, w, h, cx, cy, size int) (Stats, error) {
 	return Stats{Mean: mean, Noise: noise, Pixels: len(idx)}, nil
 }
 
+// RingStats measures the sigma-clipped sky level and noise in an annulus
+// around (cx, cy). It leaves the artefact itself out of the sample, so the
+// local sky can be measured next to a repaired disc. The annulus must lie
+// inside the image.
+func RingStats(plane []float32, w, h, cx, cy, inner, outer int) (Stats, error) {
+	if w <= 0 || h <= 0 {
+		return Stats{}, fmt.Errorf("image is %d×%d, want positive dimensions", w, h)
+	}
+	if len(plane) < w*h {
+		return Stats{}, fmt.Errorf("image has %d samples, want at least %d", len(plane), w*h)
+	}
+	if inner < 0 || outer <= inner {
+		return Stats{}, fmt.Errorf("annulus radii must satisfy 0 <= inner < outer, got %d and %d",
+			inner, outer)
+	}
+	if cx-outer < 0 || cx+outer >= w || cy-outer < 0 || cy+outer >= h {
+		return Stats{}, fmt.Errorf("annulus centred at (%d,%d) of outer radius %d falls outside %d×%d",
+			cx, cy, outer, w, h)
+	}
+
+	inner2 := inner * inner
+	outer2 := outer * outer
+	idx := make([]int, 0, (2*outer+1)*(2*outer+1))
+	for y := cy - outer; y <= cy+outer; y++ {
+		dy := y - cy
+		line := y * w
+		for x := cx - outer; x <= cx+outer; x++ {
+			dx := x - cx
+			d2 := dx*dx + dy*dy
+			if d2 < inner2 || d2 > outer2 {
+				continue
+			}
+			i := line + x
+			v := float64(plane[i])
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				continue
+			}
+			idx = append(idx, i)
+		}
+	}
+	if len(idx) < 16 {
+		return Stats{}, errors.New("too few finite pixels in the annulus")
+	}
+
+	mean, noise := stats(plane, idx)
+	for pass := 0; pass < clipPasses && noise > 0; pass++ {
+		limit := clipSigma * noise
+		kept := idx[:0]
+		for _, i := range idx {
+			if math.Abs(float64(plane[i])-mean) <= limit {
+				kept = append(kept, i)
+			}
+		}
+		idx = kept
+		if len(idx) < 16 {
+			return Stats{}, errors.New("too few pixels survive clipping in the annulus")
+		}
+		mean, noise = stats(plane, idx)
+	}
+	if noise <= 0 {
+		return Stats{}, errors.New("annulus has no noise")
+	}
+	return Stats{Mean: mean, Noise: noise, Pixels: len(idx)}, nil
+}
+
 func stats(plane []float32, idx []int) (mean, noise float64) {
 	var sum, sq float64
 	for _, i := range idx {

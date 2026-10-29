@@ -145,7 +145,8 @@ When `--dirty` is used, the extracted profile is saved as two files:
 The result is `output/<filter>/detection.csv`, one row per frame. The frames
 listed with `detected;true` are the ones that show the artefact. The reference
 frame appears with `detected;false` and empty measurement columns, because it
-is the baseline.
+is the baseline. The settings used for the run, including `min_snr`, are also
+written to `output/<filter>/detect.json`; later stages reuse that threshold.
 
 If the artefact has an obvious shape, adding `--dirty` and `--dirty-coord`
 usually improves the separation between frames that have it and frames that
@@ -353,20 +354,31 @@ instead. No copies are made, and clean or unlisted frames are left exactly as
 they are. The originals are replaced, so there is no backup: copy the frames
 first if you need to keep them.
 
-The repair uses three files written earlier:
+The repair uses files written earlier:
 
 - the union catalogue, default `output/LRGB/artefacts.csv`;
+- the detection settings, default `output/<filter>/detect.json`;
+- the matched-filter profile, default `output/<filter>/artefact.npe`;
 - the background window, default `output/LRGB/background.csv`;
 - the reference master, default `output/L/L_stack_clean.xisf` (that is,
   `output/<filter>/<filter>_stack_clean.xisf`).
 
-For each artefact, a disc of 32 pixels around its centre is replaced by the
-matching part of the clean master. The clean pixels are moved onto the frame's
-own sky level, and Gaussian noise is added to bring the patch up to the frame's
-noise. Both values are measured in the 65x65 background window, so the repair
-matches the frame rather than the cleaner reference. A 6-pixel feather blends
-the patch into the surroundings, and the noise is seeded from the frame name
-and artefact number, so repeated runs give the same result.
+The catalogue position is only a starting point. For every artefact in a
+detected frame, `erase` searches `--search-radius` pixels around it using the
+saved profile, or a Gaussian at the catalogue `ghost_sigma` when no profile is
+available. The frame is fitted to the clean master once, and every local
+window gets its own background plane and star mask. If the local peak is below
+the threshold recorded in `detect.json`, that artefact is skipped. Use
+`--min-snr` to override the stored threshold.
+
+The repaired disc starts at `--radius` and grows with `ghost_sigma` according
+to `--radius-scale`. The clean pixels are moved onto the frame's local sky
+level, Gaussian noise is added to match the local noise, and a `--feather`
+pixel blend hides the rim. The noise is seeded from the frame name and
+artefact number, so repeated runs give the same result.
+
+Every decision is written to `output/<filter>/inpaint.csv`, including the
+catalogue and found positions, local SNR, radius, and why a skip happened.
 
 By default the repaired frames are written to `output/registered/<filter>/`
 and the input frames are never modified. With `--inplace` the detected frames
@@ -395,8 +407,11 @@ Main options:
 | `--background` | Background window record, when it is not the default. |
 | `--clean` | Clean master to use as reference. |
 | `--detection` | Detection report deciding which frames are modified. |
-| `--radius` | Radius of the repaired disc, default 32 pixels. |
-| `--feather` | Blend width inside the rim, default 6 pixels. |
+| `--radius` | Minimum radius of the repaired disc, default 20 pixels. |
+| `--radius-scale` | Per-artefact radius multiplier of `ghost_sigma`, default 2.5; `0` keeps `--radius` fixed. |
+| `--feather` | Blend width inside the rim, default 4 pixels. |
+| `--search-radius` | Radius searched around each catalogue position, default 24 pixels. |
+| `--min-snr` | Local detection threshold; default comes from `detect.json`. |
 | `-j` | Number of frames processed at once, default 4. |
 
 ## Running every filter
@@ -451,6 +466,7 @@ a few pixels of the one for B, but measure it in each filter.
 | File | Contents |
 | --- | --- |
 | `output/<filter>/detection.csv` | Per-frame detection table from `detect`. |
+| `output/<filter>/detect.json` | Settings used by `detect`, including the localisation threshold. |
 | `output/<filter>/artefact_profile.png` | Visual profile kernel from `detect --dirty`. |
 | `output/<filter>/artefact.npe` | Numerical profile kernel from `detect --dirty`. |
 | `output/<filter>/artefacts.csv` | Artefact catalogue from `scan`. |
@@ -460,6 +476,7 @@ a few pixels of the one for B, but measure it in each filter.
 | `output/<LRGBSHO...>/artefacts.csv` | Merged catalogue from `union`. |
 | `output/<LRGBSHO...>/background.csv` | Centre and sky statistics of the background window. |
 | `output/<LRGBSHO...>/<filter>_stack_detected.xisf` | Annotated image with yellow markers for missing artefacts and the background square. |
+| `output/<filter>/inpaint.csv` | Per-artefact localisation and repair report from `erase`. |
 | `output/registered/<filter>/<name>.xisf` | Repaired frames written by `erase`; clean frames are unchanged copies. |
 
 Both CSV files use a semicolon as separator and a comma as decimal separator,
@@ -606,6 +623,12 @@ it is missing from that report. Both are reported in the log.
 **A round mark appears where an artefact was repaired**
 The frame has passing cloud or a steep background gradient, so the clean patch
 sits at the wrong local level. Exclude the frame and run `erase` again.
+
+**An artefact is listed in inpaint.csv but applied is false**
+Check the `reason` column. `below min-snr` means the local peak was too weak for
+the threshold stored in `detect.json`; lower `--min-snr` to accept it. A
+window or fit error means the artefact is too close to the frame edge for the
+available background ring.
 
 **A known artefact is missing from one filter**
 It may be below that filter's threshold, or inside the excluded border or a
