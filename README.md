@@ -373,11 +373,12 @@ gets its own background plane and star mask. If the local peak is below the
 threshold recorded in `detect.json`, that artefact is skipped. Use
 `--min-snr` to override the stored threshold.
 
-The repaired disc starts at `--radius` and grows with `ghost_sigma` according
-to `--radius-scale`. With the defaults, a `ghost_sigma` of 10 gives a 13 px
-disc plus the 4 px feather. The frame's local sky is modelled with a first-order
-plane, the clean structure is scaled by the frame-to-clean affine slope, and
-Gaussian noise is added to match the local noise. The local annulus excludes
+When `artefact.npe` is available, the repaired disc uses the scaled profile
+support, so the full visible wing is covered. Without a profile it starts at
+`--radius` and grows with `ghost_sigma` according to `--radius-scale`
+(default 2.5). `--radius` is always a floor. The frame's local sky is modelled
+with a first-order plane, the clean structure is scaled by the frame-to-clean
+affine slope, and Gaussian noise is added to match the local noise. The local annulus excludes
 star-mask pixels; if it is much noisier than the global background, the global
 `background.csv` window is used instead. A `--feather` pixel blend hides the
 rim. The noise is seeded from the frame name and
@@ -386,9 +387,11 @@ artefact number, so repeated runs give the same result.
 Every decision is written to `output/<filter>/inpaint.csv`:
 
 ```
-frame;artefact;catalogue_x;catalogue_y;found_x;found_y;snr;radius;applied;calibration;reason
+frame;artefact;catalogue_x;catalogue_y;found_x;found_y;snr;radius;radius_source;applied;calibration;reason
 ```
 
+`radius_source` is `profile` when the scaled profile support set the radius,
+`scale` when the Gaussian fallback did, and `fixed` when `--radius` was used.
 `calibration` is `local` when the annulus around the found position was used,
 `global` when the `background.csv` window was the fallback, and empty for a
 skipped artefact. `reason` explains the skip.
@@ -421,7 +424,7 @@ Main options:
 | `--clean` | Clean master to use as reference. |
 | `--detection` | Detection report deciding which frames are modified. |
 | `--radius` | Minimum radius of the repaired disc, default 12 pixels. |
-| `--radius-scale` | Per-artefact radius multiplier of `ghost_sigma`, default 1.25; `0` keeps `--radius` fixed. |
+| `--radius-scale` | Gaussian fallback multiplier of `ghost_sigma`, default 2.5; `0` uses the fixed radius. Profiles use their scaled support instead. |
 | `--feather` | Blend width inside the rim, default 4 pixels. |
 | `--search-radius` | Circular radius searched around each catalogue position, default 24 pixels. |
 | `--search-guard` | Peaks within this distance of the search radius are rejected, default 4 pixels. |

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hoxca/exorciser/internal/detect"
 	"github.com/hoxca/exorciser/internal/report"
 	"github.com/hoxca/xisf"
 )
@@ -408,25 +409,32 @@ func TestResolveEraseMinSNR(t *testing.T) {
 	}
 }
 
-func TestArtefactRadius(t *testing.T) {
+func TestRepairRadius(t *testing.T) {
+	profile20 := &detect.Profile{Radius: 20, Kernel: make([]float64, 41*41)}
+	profile8 := &detect.Profile{Radius: 8, Kernel: make([]float64, 17*17)}
 	tests := []struct {
+		name    string
 		scale   float64
+		profile *detect.Profile
 		minimum int
 		factor  float64
 		want    int
+		source  string
 	}{
-		{scale: 6, minimum: 20, factor: 2.5, want: 20},
-		{scale: 8, minimum: 20, factor: 2.5, want: 20},
-		{scale: 10, minimum: 20, factor: 2.5, want: 25},
-		{scale: 12, minimum: 20, factor: 2.5, want: 30},
-		{scale: 10, minimum: 20, factor: 0, want: 20},
-		{scale: 0, minimum: 20, factor: 2.5, want: 20},
+		{name: "profile", scale: 10, profile: profile20, minimum: 12, factor: 2.5, want: 20, source: "profile"},
+		{name: "profile floor", scale: 10, profile: profile8, minimum: 12, factor: 2.5, want: 12, source: "profile"},
+		{name: "scale", scale: 10, minimum: 12, factor: 2.5, want: 25, source: "scale"},
+		{name: "fixed factor", scale: 10, minimum: 12, factor: 0, want: 12, source: "fixed"},
+		{name: "fixed scale", scale: 0, minimum: 12, factor: 2.5, want: 12, source: "fixed"},
 	}
 	for _, tt := range tests {
-		if got := artefactRadius(tt.scale, tt.minimum, tt.factor); got != tt.want {
-			t.Errorf("artefactRadius(%v, %d, %v) = %d, want %d",
-				tt.scale, tt.minimum, tt.factor, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got, source := repairRadius(tt.scale, tt.profile, tt.minimum, tt.factor)
+			if got != tt.want || source != tt.source {
+				t.Errorf("repairRadius(%v, %v, %d, %v) = %d,%q, want %d,%q",
+					tt.scale, tt.profile, tt.minimum, tt.factor, got, source, tt.want, tt.source)
+			}
+		})
 	}
 }
 
@@ -434,7 +442,7 @@ func TestWriteInpaintReport(t *testing.T) {
 	path := filepath.Join(t.TempDir(), inpaintReportName)
 	records := []inpaintRecord{
 		{Frame: "a.xisf", Artefact: 1, CatalogueX: 10, CatalogueY: 20,
-			FoundX: 11, FoundY: 19, SNR: 7.25, Radius: 22, Applied: true, Calibration: "local"},
+			FoundX: 11, FoundY: 19, SNR: 7.25, Radius: 22, RadiusSource: "profile", Applied: true, Calibration: "local"},
 		{Frame: "b.xisf", Artefact: 1, CatalogueX: 10, CatalogueY: 20,
 			FoundX: 0, FoundY: 0, SNR: 2, Radius: 20, Reason: "below min-snr"},
 	}
@@ -447,9 +455,9 @@ func TestWriteInpaintReport(t *testing.T) {
 	}
 	text := string(raw)
 	for _, want := range []string{
-		"frame;artefact;catalogue_x;catalogue_y;found_x;found_y;snr;radius;applied;calibration;reason\n",
-		"a.xisf;1;10;20;11;19;7,250;22;true;local;\n",
-		"b.xisf;1;10;20;0;0;2,000;20;false;;below min-snr\n",
+		"frame;artefact;catalogue_x;catalogue_y;found_x;found_y;snr;radius;radius_source;applied;calibration;reason\n",
+		"a.xisf;1;10;20;11;19;7,250;22;profile;true;local;\n",
+		"b.xisf;1;10;20;0;0;2,000;20;;false;;below min-snr\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("report does not contain %q:\n%s", want, text)

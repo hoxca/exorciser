@@ -33,7 +33,7 @@ const (
 	eraseDefaultFeather      = 4
 	eraseDefaultSearchRadius = 24
 	eraseDefaultSearchGuard  = 4
-	eraseDefaultRadiusScale  = 1.25
+	eraseDefaultRadiusScale  = 2.5
 	eraseDefaultMinSNR       = 6
 	inpaintReportName        = "inpaint.csv"
 )
@@ -90,8 +90,10 @@ plane and star mask. An artefact is skipped when its local peak_snr is below the
 detection threshold stored by detect in detect.json; use --min-snr to override
 it.
 
-Each repaired disc starts at --radius and grows with ghost_sigma according to
---radius-scale, so a large artefact is not clipped. The frame's local sky is
+Each repaired disc uses the scaled artefact.npe profile support when a profile
+is available, so the full visible wing is covered. Without a profile it starts
+at --radius and grows with ghost_sigma according to --radius-scale. --radius is
+always a floor. The frame's local sky is
 modelled with a first-order plane, the clean structure is scaled by the frame
 to clean affine slope, and Gaussian noise brings the patch to the frame's local
 noise. The local annulus excludes star-mask pixels; if it is much noisier than
@@ -200,17 +202,18 @@ func (o *eraseOptions) validate() error {
 
 // inpaintRecord is one localisation and repair decision for inpaint.csv.
 type inpaintRecord struct {
-	Frame       string
-	Artefact    int
-	CatalogueX  int
-	CatalogueY  int
-	FoundX      int
-	FoundY      int
-	SNR         float64
-	Radius      int
-	Applied     bool
-	Calibration string
-	Reason      string
+	Frame        string
+	Artefact     int
+	CatalogueX   int
+	CatalogueY   int
+	FoundX       int
+	FoundY       int
+	SNR          float64
+	Radius       int
+	RadiusSource string
+	Applied      bool
+	Calibration  string
+	Reason       string
 }
 
 func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
@@ -508,7 +511,7 @@ func eraseFrame(ctx context.Context, src, outDir string, detected map[string]boo
 			CatalogueX: a.X,
 			CatalogueY: a.Y,
 		}
-		result, radius, err := locateArtefact(plane, cleanPlane, w, h, a, affine,
+		result, radius, radiusSource, err := locateArtefact(plane, cleanPlane, w, h, a, affine,
 			starMask, baseProfile, opts)
 		if err != nil {
 			rec.Reason = err.Error()
@@ -518,6 +521,7 @@ func eraseFrame(ctx context.Context, src, outDir string, detected map[string]boo
 		rec.FoundX, rec.FoundY = result.PeakX, result.PeakY
 		rec.SNR = result.PeakSNR
 		rec.Radius = radius
+		rec.RadiusSource = radiusSource
 		if result.PeakSNR < minSNR {
 			rec.Reason = "below min-snr"
 			records = append(records, rec)
@@ -632,7 +636,7 @@ func localiseWindow(x, y, w, h, maxRadius, search int) (detect.Window, int, int,
 func locateArtefact(frame, clean []float32, w, h int, a report.Artefact,
 	affine detect.Affine, starMask []bool, baseProfile *detect.Profile,
 	opts *eraseOptions,
-) (detect.Result, int, error) {
+) (detect.Result, int, string, error) {
 	scale := a.Scale
 	if scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
 		scale = 8
@@ -653,7 +657,7 @@ func locateArtefact(frame, clean []float32, w, h int, a report.Artefact,
 
 	win, margin, search, err := localiseWindow(a.X, a.Y, w, h, maxRadius, opts.searchRadius)
 	if err != nil {
-		return detect.Result{}, 0, err
+		return detect.Result{}, 0, "", err
 	}
 	scoreOpts := detect.Options{
 		Window:           win,
@@ -672,22 +676,30 @@ func locateArtefact(frame, clean []float32, w, h int, a report.Artefact,
 	}
 	result, err := detect.Score(frame, clean, w, h, scoreOpts)
 	if err != nil {
-		return detect.Result{}, 0, err
+		return detect.Result{}, 0, "", err
 	}
-	return result, artefactRadius(scale, opts.radius, opts.radiusScale), nil
+	radius, source := repairRadius(scale, scaledProfile, opts.radius, opts.radiusScale)
+	return result, radius, source, nil
 }
 
-// artefactRadius applies the per-artefact size scale, keeping --radius as the
-// minimum for small features.
-func artefactRadius(scale float64, minimum int, factor float64) int {
-	if factor <= 0 || scale <= 0 {
-		return minimum
+// repairRadius chooses the repair radius from the scaled profile support when
+// one is available, otherwise from ghost_sigma. --radius is always a floor.
+func repairRadius(scale float64, profile *detect.Profile, minimum int, factor float64) (int, string) {
+	if profile != nil && profile.Radius > 0 {
+		r := profile.Radius
+		if r < minimum {
+			r = minimum
+		}
+		return r, "profile"
+	}
+	if factor <= 0 || scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
+		return minimum, "fixed"
 	}
 	r := int(math.Ceil(factor * scale))
 	if r < minimum {
 		r = minimum
 	}
-	return r
+	return r, "scale"
 }
 
 // writeInpaintReport writes the per-frame localisation decisions.
@@ -699,7 +711,7 @@ func writeInpaintReport(path string, records []inpaintRecord) error {
 	cw := csv.NewWriter(f)
 	cw.Comma = report.Separator
 	header := []string{"frame", "artefact", "catalogue_x", "catalogue_y",
-		"found_x", "found_y", "snr", "radius", "applied", "calibration", "reason"}
+		"found_x", "found_y", "snr", "radius", "radius_source", "applied", "calibration", "reason"}
 	if err := cw.Write(header); err != nil {
 		_ = f.Close()
 		return err
@@ -714,6 +726,7 @@ func writeInpaintReport(path string, records []inpaintRecord) error {
 			strconv.Itoa(r.FoundY),
 			formatReportFloat(r.SNR),
 			strconv.Itoa(r.Radius),
+			r.RadiusSource,
 			strconv.FormatBool(r.Applied),
 			r.Calibration,
 			r.Reason,
