@@ -32,6 +32,7 @@ const (
 	eraseDefaultRadius       = 20
 	eraseDefaultFeather      = 4
 	eraseDefaultSearchRadius = 24
+	eraseDefaultSearchGuard  = 4
 	eraseDefaultRadiusScale  = 2.5
 	eraseDefaultMinSNR       = 6
 	inpaintReportName        = "inpaint.csv"
@@ -49,6 +50,7 @@ type eraseOptions struct {
 	radius       int
 	feather      int
 	searchRadius int
+	searchGuard  int
 	radiusScale  float64
 	minSNR       float64
 	workers      int
@@ -78,19 +80,24 @@ background window is read from background.csv in that directory, and the clean
 master from <products>/<filter>/<filter>_stack_clean.xisf.
 
 The catalogue position is only a starting point. For every artefact in a
-detected frame, erase searches --search-radius pixels around it with a matched
-filter built from the filter's artefact.npe profile, or from a Gaussian at the
-catalogue ghost_sigma when no profile exists. The frame is fitted to the clean
-master once, and each local window gets its own background plane and star mask.
-An artefact is skipped when its local peak_snr is below the detection threshold
-stored by detect in detect.json; use --min-snr to override it.
+detected frame, erase searches a circular --search-radius around it with a
+matched filter built from the filter's artefact.npe profile, or from a Gaussian
+at the catalogue ghost_sigma when no profile exists. Peaks within
+--search-guard pixels of that radius are rejected, so a bright object just
+outside the expected region cannot be mistaken for the artefact. The frame is
+fitted to the clean master once, and each local window gets its own background
+plane and star mask. An artefact is skipped when its local peak_snr is below the
+detection threshold stored by detect in detect.json; use --min-snr to override
+it.
 
 Each repaired disc starts at --radius and grows with ghost_sigma according to
---radius-scale, so a large artefact is not clipped. The clean samples are
-shifted onto the frame's local sky level and Gaussian noise is added to match
-the local noise. A --feather pixel blend inside the rim hides the transition.
-The added noise is seeded from the frame name and artefact number, so the
-result is reproducible.
+--radius-scale, so a large artefact is not clipped. The frame's local sky is
+modelled with a first-order plane, the clean structure is scaled by the frame
+to clean affine slope, and Gaussian noise brings the patch to the frame's local
+noise. The local annulus excludes star-mask pixels; if it is much noisier than
+the global background, erase falls back to the global background window. A
+--feather pixel blend inside the rim hides the transition. The added noise is
+seeded from the frame name and artefact number, so the result is reproducible.
 
 A per-artefact report is written to <products>/<filter>/inpaint.csv.
 
@@ -139,6 +146,8 @@ Output defaults to output/registered/<filter>/.`,
 		"blend width in pixels inside the disc rim")
 	flags.IntVar(&opts.searchRadius, "search-radius", eraseDefaultSearchRadius,
 		"radius in pixels searched around each catalogue position")
+	flags.IntVar(&opts.searchGuard, "search-guard", eraseDefaultSearchGuard,
+		"reject peaks within this distance of the search radius")
 	flags.Float64Var(&opts.minSNR, "min-snr", 0,
 		"local detection threshold (default: read from detect.json)")
 	flags.IntVarP(&opts.workers, "workers", "j", 4,
@@ -170,6 +179,13 @@ func (o *eraseOptions) validate() error {
 	if o.searchRadius < 0 {
 		return fmt.Errorf("--search-radius must not be negative, got %d", o.searchRadius)
 	}
+	if o.searchGuard < 0 {
+		return fmt.Errorf("--search-guard must not be negative, got %d", o.searchGuard)
+	}
+	if o.searchRadius > 0 && o.searchGuard >= o.searchRadius {
+		return fmt.Errorf("--search-guard %d must be smaller than --search-radius %d",
+			o.searchGuard, o.searchRadius)
+	}
 	if o.radiusScale < 0 || math.IsNaN(o.radiusScale) || math.IsInf(o.radiusScale, 0) {
 		return fmt.Errorf("--radius-scale must not be negative, got %v", o.radiusScale)
 	}
@@ -184,16 +200,17 @@ func (o *eraseOptions) validate() error {
 
 // inpaintRecord is one localisation and repair decision for inpaint.csv.
 type inpaintRecord struct {
-	Frame      string
-	Artefact   int
-	CatalogueX int
-	CatalogueY int
-	FoundX     int
-	FoundY     int
-	SNR        float64
-	Radius     int
-	Applied    bool
-	Reason     string
+	Frame       string
+	Artefact    int
+	CatalogueX  int
+	CatalogueY  int
+	FoundX      int
+	FoundY      int
+	SNR         float64
+	Radius      int
+	Applied     bool
+	Calibration string
+	Reason      string
 }
 
 func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
@@ -309,6 +326,7 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 		"artefacts", len(artefacts),
 		"min_snr", minSNR,
 		"search_radius", opts.searchRadius,
+		"search_guard", opts.searchGuard,
 		"radius", opts.radius,
 		"radius_scale", opts.radiusScale,
 		"profile", baseProfile != nil,
@@ -506,26 +524,44 @@ func eraseFrame(ctx context.Context, src, outDir string, detected map[string]boo
 			continue
 		}
 
-		targetStats, cleanLocal := targetGlobal, cleanStats
+		rec.Calibration = "global"
+		scale := affine.A
+		if scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
+			scale = 1
+		}
 		inner := radius + opts.feather + 2
 		outer := inner + 16
-		if st, err := erase.RingStats(plane, w, h, result.PeakX, result.PeakY, inner, outer); err == nil {
-			targetStats = st
-		} else {
-			slog.Debug("local target annulus failed; using global background",
-				"file", name, "artefact", a.N, "err", err)
-		}
-		if st, err := erase.RingStats(cleanPlane, w, h, result.PeakX, result.PeakY, inner, outer); err == nil {
-			cleanLocal = st
-		} else {
-			slog.Debug("local clean annulus failed; using global background",
-				"file", name, "artefact", a.N, "err", err)
-		}
+		targetLocal, targetErr := erase.RingPlaneStats(plane, w, h, result.PeakX, result.PeakY, inner, outer, starMask)
+		cleanPlaneLocal, cleanErr := erase.RingPlaneStats(cleanPlane, w, h, result.PeakX, result.PeakY, inner, outer, starMask)
 		cal := erase.Calibration{
-			TargetMean:  targetStats.Mean,
-			TargetNoise: targetStats.Noise,
-			CleanMean:   cleanLocal.Mean,
-			CleanNoise:  cleanLocal.Noise,
+			TargetMean:  targetGlobal.Mean,
+			TargetNoise: targetGlobal.Noise,
+			CleanMean:   cleanStats.Mean,
+			CleanNoise:  cleanStats.Noise,
+			Scale:       scale,
+		}
+		if targetErr == nil && cleanErr == nil {
+			// A ring crossing a star halo or a bright neighbour can report a
+			// noise several times higher than the frame background. Prefer the
+			// global fallback in that case rather than injecting the excess as
+			// grain into the repair.
+			if targetLocal.Noise <= 3*targetGlobal.Noise && cleanPlaneLocal.Noise <= 3*cleanStats.Noise {
+				cal.TargetMean = targetLocal.Plane.C0
+				cal.TargetNoise = targetLocal.Noise
+				cal.TargetPlane = &targetLocal.Plane
+				cal.CleanMean = cleanPlaneLocal.Plane.C0
+				cal.CleanNoise = cleanPlaneLocal.Noise
+				cal.CleanPlane = &cleanPlaneLocal.Plane
+				rec.Calibration = "local"
+			} else {
+				slog.Debug("local annulus is much noisier than the background; using global fallback",
+					"file", name, "artefact", a.N,
+					"target_noise", targetLocal.Noise, "target_global", targetGlobal.Noise,
+					"clean_noise", cleanPlaneLocal.Noise, "clean_global", cleanStats.Noise)
+			}
+		} else {
+			slog.Debug("local annulus failed; using global background",
+				"file", name, "artefact", a.N, "target_err", targetErr, "clean_err", cleanErr)
 		}
 		rng := rand.New(rand.NewSource(eraseSeed(name, i)))
 		if err := erase.Inpaint(plane, cleanPlane, w, h, result.PeakX, result.PeakY,
@@ -624,6 +660,7 @@ func locateArtefact(frame, clean []float32, w, h int, a report.Artefact,
 		Margin:           margin,
 		Scales:           []float64{scale},
 		SearchRadius:     search,
+		SearchGuard:      opts.searchGuard,
 		Affine:           &affine,
 		Mask:             starMask,
 		Stride:           8,
@@ -662,7 +699,7 @@ func writeInpaintReport(path string, records []inpaintRecord) error {
 	cw := csv.NewWriter(f)
 	cw.Comma = report.Separator
 	header := []string{"frame", "artefact", "catalogue_x", "catalogue_y",
-		"found_x", "found_y", "snr", "radius", "applied", "reason"}
+		"found_x", "found_y", "snr", "radius", "applied", "calibration", "reason"}
 	if err := cw.Write(header); err != nil {
 		_ = f.Close()
 		return err
@@ -678,6 +715,7 @@ func writeInpaintReport(path string, records []inpaintRecord) error {
 			formatReportFloat(r.SNR),
 			strconv.Itoa(r.Radius),
 			strconv.FormatBool(r.Applied),
+			r.Calibration,
 			r.Reason,
 		}
 		if err := cw.Write(row); err != nil {

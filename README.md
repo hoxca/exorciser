@@ -364,21 +364,33 @@ The repair uses files written earlier:
   `output/<filter>/<filter>_stack_clean.xisf`).
 
 The catalogue position is only a starting point. For every artefact in a
-detected frame, `erase` searches `--search-radius` pixels around it using the
-saved profile, or a Gaussian at the catalogue `ghost_sigma` when no profile is
-available. The frame is fitted to the clean master once, and every local
-window gets its own background plane and star mask. If the local peak is below
-the threshold recorded in `detect.json`, that artefact is skipped. Use
+detected frame, `erase` searches a circular `--search-radius` around it using
+the saved profile, or a Gaussian at the catalogue `ghost_sigma` when no profile
+is available. Peaks within `--search-guard` pixels of that radius are rejected,
+so a bright object just outside the expected region is not mistaken for the
+artefact. The frame is fitted to the clean master once, and every local window
+gets its own background plane and star mask. If the local peak is below the
+threshold recorded in `detect.json`, that artefact is skipped. Use
 `--min-snr` to override the stored threshold.
 
 The repaired disc starts at `--radius` and grows with `ghost_sigma` according
-to `--radius-scale`. The clean pixels are moved onto the frame's local sky
-level, Gaussian noise is added to match the local noise, and a `--feather`
-pixel blend hides the rim. The noise is seeded from the frame name and
+to `--radius-scale`. The frame's local sky is modelled with a first-order
+plane, the clean structure is scaled by the frame-to-clean affine slope, and
+Gaussian noise is added to match the local noise. The local annulus excludes
+star-mask pixels; if it is much noisier than the global background, the global
+`background.csv` window is used instead. A `--feather` pixel blend hides the
+rim. The noise is seeded from the frame name and
 artefact number, so repeated runs give the same result.
 
-Every decision is written to `output/<filter>/inpaint.csv`, including the
-catalogue and found positions, local SNR, radius, and why a skip happened.
+Every decision is written to `output/<filter>/inpaint.csv`:
+
+```
+frame;artefact;catalogue_x;catalogue_y;found_x;found_y;snr;radius;applied;calibration;reason
+```
+
+`calibration` is `local` when the annulus around the found position was used,
+`global` when the `background.csv` window was the fallback, and empty for a
+skipped artefact. `reason` explains the skip.
 
 By default the repaired frames are written to `output/registered/<filter>/`
 and the input frames are never modified. With `--inplace` the detected frames
@@ -410,7 +422,8 @@ Main options:
 | `--radius` | Minimum radius of the repaired disc, default 20 pixels. |
 | `--radius-scale` | Per-artefact radius multiplier of `ghost_sigma`, default 2.5; `0` keeps `--radius` fixed. |
 | `--feather` | Blend width inside the rim, default 4 pixels. |
-| `--search-radius` | Radius searched around each catalogue position, default 24 pixels. |
+| `--search-radius` | Circular radius searched around each catalogue position, default 24 pixels. |
+| `--search-guard` | Peaks within this distance of the search radius are rejected, default 4 pixels. |
 | `--min-snr` | Local detection threshold; default comes from `detect.json`. |
 | `-j` | Number of frames processed at once, default 4. |
 

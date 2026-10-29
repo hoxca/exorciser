@@ -30,6 +30,8 @@ func TestEraseRejectsBadFlags(t *testing.T) {
 		{name: "inplace with output", args: []string{"--inplace", "-o", "out"}},
 		{name: "min snr", args: []string{"--min-snr=-1"}},
 		{name: "search radius", args: []string{"--search-radius=-1"}},
+		{name: "search guard", args: []string{"--search-guard=-1"}},
+		{name: "search guard too wide", args: []string{"--search-radius=10", "--search-guard=10"}},
 		{name: "radius scale", args: []string{"--radius-scale=-1"}},
 	}
 	for _, tt := range tests {
@@ -432,7 +434,7 @@ func TestWriteInpaintReport(t *testing.T) {
 	path := filepath.Join(t.TempDir(), inpaintReportName)
 	records := []inpaintRecord{
 		{Frame: "a.xisf", Artefact: 1, CatalogueX: 10, CatalogueY: 20,
-			FoundX: 11, FoundY: 19, SNR: 7.25, Radius: 22, Applied: true},
+			FoundX: 11, FoundY: 19, SNR: 7.25, Radius: 22, Applied: true, Calibration: "local"},
 		{Frame: "b.xisf", Artefact: 1, CatalogueX: 10, CatalogueY: 20,
 			FoundX: 0, FoundY: 0, SNR: 2, Radius: 20, Reason: "below min-snr"},
 	}
@@ -445,9 +447,9 @@ func TestWriteInpaintReport(t *testing.T) {
 	}
 	text := string(raw)
 	for _, want := range []string{
-		"frame;artefact;catalogue_x;catalogue_y;found_x;found_y;snr;radius;applied;reason\n",
-		"a.xisf;1;10;20;11;19;7,250;22;true;\n",
-		"b.xisf;1;10;20;0;0;2,000;20;false;below min-snr\n",
+		"frame;artefact;catalogue_x;catalogue_y;found_x;found_y;snr;radius;applied;calibration;reason\n",
+		"a.xisf;1;10;20;11;19;7,250;22;true;local;\n",
+		"b.xisf;1;10;20;0;0;2,000;20;false;;below min-snr\n",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("report does not contain %q:\n%s", want, text)

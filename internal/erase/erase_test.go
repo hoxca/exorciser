@@ -231,3 +231,48 @@ func TestRingStatsRejectsBadAnnulus(t *testing.T) {
 		t.Error("RingStats accepted an annulus crossing the border")
 	}
 }
+
+func TestRingPlaneStatsFitsGradient(t *testing.T) {
+	const w, h = 220, 220
+	plane := sky(w, h, 0.01, 0.001, 21)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			plane[y*w+x] += float32(0.0001*float64(x) + 0.00005*float64(y))
+		}
+	}
+	st, err := erase.RingPlaneStats(plane, w, h, 110, 110, 30, 45, nil)
+	if err != nil {
+		t.Fatalf("RingPlaneStats: %v", err)
+	}
+	if math.Abs(st.Plane.C1-0.0001) > 5e-6 {
+		t.Errorf("C1 = %v, want about 0.0001", st.Plane.C1)
+	}
+	if math.Abs(st.Plane.C2-0.00005) > 5e-6 {
+		t.Errorf("C2 = %v, want about 0.00005", st.Plane.C2)
+	}
+	if math.Abs(st.Noise-0.001) > 0.0002 {
+		t.Errorf("noise = %v, want about 0.001", st.Noise)
+	}
+}
+
+func TestRingPlaneStatsMaskKeepsStarOut(t *testing.T) {
+	const w, h = 220, 220
+	plane := sky(w, h, 0.01, 0.001, 22)
+	mask := make([]bool, w*h)
+	for y := 105; y < 115; y++ {
+		for x := 140; x < 150; x++ {
+			plane[y*w+x] = 0.5
+			mask[y*w+x] = true
+		}
+	}
+	st, err := erase.RingPlaneStats(plane, w, h, 110, 110, 30, 45, mask)
+	if err != nil {
+		t.Fatalf("RingPlaneStats: %v", err)
+	}
+	if math.Abs(st.Plane.C0-0.01) > 0.0003 {
+		t.Errorf("C0 = %v, want about 0.01", st.Plane.C0)
+	}
+	if math.Abs(st.Noise-0.001) > 0.0002 {
+		t.Errorf("noise = %v, want about 0.001", st.Noise)
+	}
+}

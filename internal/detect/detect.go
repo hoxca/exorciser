@@ -46,8 +46,12 @@ type Options struct {
 	// A nil Profile disables profile scoring.
 	Profile *Profile
 	// SearchRadius bounds the peak search to this many pixels around the
-	// window centre. Zero searches the whole window.
+	// window centre. Zero searches the whole window. The radius is circular;
+	// use SearchGuard to reject peaks at its edge.
 	SearchRadius int
+	// SearchGuard rejects peaks within this many pixels of the search radius.
+	// Zero accepts the whole circular radius.
+	SearchGuard int
 	// Stride is the subsampling step used to fit the affine transform.
 	Stride int
 	// ClipSigma masks residual pixels beyond this many noise sigmas.
@@ -494,6 +498,13 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 	if opts.SearchRadius < 0 {
 		return Result{}, fmt.Errorf("search radius must not be negative, got %d", opts.SearchRadius)
 	}
+	if opts.SearchGuard < 0 {
+		return Result{}, fmt.Errorf("search guard must not be negative, got %d", opts.SearchGuard)
+	}
+	if opts.SearchGuard > 0 && opts.SearchGuard >= opts.SearchRadius && opts.SearchRadius > 0 {
+		return Result{}, fmt.Errorf("search guard %d must be smaller than the search radius %d",
+			opts.SearchGuard, opts.SearchRadius)
+	}
 	if opts.ProfileClipSigma <= 0 || !finite(opts.ProfileClipSigma) {
 		return Result{}, fmt.Errorf("profile clip sigma must be positive, got %v", opts.ProfileClipSigma)
 	}
@@ -521,6 +532,15 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 	best := 0.0
 	searched := 0
 	lo, hi := searchBounds(win.Size, maxRadius, opts.SearchRadius)
+	inSearch := func(i, j int) bool {
+		if opts.SearchRadius <= 0 {
+			return true
+		}
+		centre := maxRadius + win.Size/2
+		dx, dy := i-centre, j-centre
+		limit := max(0, opts.SearchRadius-opts.SearchGuard)
+		return dx*dx+dy*dy <= limit*limit
+	}
 
 	for _, scale := range opts.Scales {
 		radius := int(math.Ceil(3 * scale))
@@ -537,6 +557,9 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 
 		for j := lo; j < hi; j++ {
 			for i := lo; i < hi; i++ {
+				if !inSearch(i, j) {
+					continue
+				}
 				idx := j*prep.ext + i
 				if weight[idx] <= 0.5*wFull {
 					continue
@@ -580,6 +603,9 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 
 		for j := lo; j < hi; j++ {
 			for i := lo; i < hi; i++ {
+				if !inSearch(i, j) {
+					continue
+				}
 				idx := j*profilePrep.ext + i
 				if weight[idx] <= 0.5*wFull {
 					continue
@@ -608,7 +634,8 @@ func Score(frame, ref []float32, w, h int, opts Options) (Result, error) {
 
 // searchBounds returns the support-plane index range searched for a peak. The
 // window occupies [offset, offset+size); a positive searchRadius narrows that
-// to a square around its middle.
+// to a square around its middle. Score applies the circular test inside that
+// square.
 func searchBounds(size, offset, searchRadius int) (lo, hi int) {
 	lo, hi = offset, offset+size
 	if searchRadius <= 0 {

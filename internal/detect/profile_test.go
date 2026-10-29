@@ -322,3 +322,54 @@ func TestScoreSearchRadius(t *testing.T) {
 		t.Errorf("PeakSNR = %.2f for a ghost in the window, want at least 5", res.PeakSNR)
 	}
 }
+
+func TestScoreSearchRadiusIsCircular(t *testing.T) {
+	ref, frame := paired(0.004, 41)
+	// Window centre is (300,260). The ghost is at (+20,+20), distance 28.3:
+	// inside a 30 px square, outside a 20 px circle.
+	addGhost(frame, 320, 280, 0.05, 2)
+
+	opts := Options{
+		Window:       At(300, 260, 128),
+		Margin:       64,
+		Scales:       []float64{2},
+		SearchRadius: 20,
+		ClipSigma:    20,
+	}
+	res, err := Score(frame, ref, testW, testH, opts)
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if res.PeakSNR > 5 {
+		t.Errorf("PeakSNR = %.2f for a source outside the circular radius, want noise", res.PeakSNR)
+	}
+
+	opts.SearchRadius = 40
+	res, err = Score(frame, ref, testW, testH, opts)
+	if err != nil {
+		t.Fatalf("Score wide: %v", err)
+	}
+	if res.PeakSNR < 6 {
+		t.Errorf("PeakSNR = %.2f for a source inside the circular radius, want detection", res.PeakSNR)
+	}
+
+	opts.SearchGuard = 17 // effective radius 28, source at 28.3
+	res, err = Score(frame, ref, testW, testH, opts)
+	if err != nil {
+		t.Fatalf("Score guarded: %v", err)
+	}
+	if res.PeakSNR > 5 {
+		t.Errorf("PeakSNR = %.2f at the search boundary, want it rejected", res.PeakSNR)
+	}
+}
+
+func TestScoreRejectsBadSearchGuard(t *testing.T) {
+	ref, frame := paired(0.004, 42)
+	_, err := Score(frame, ref, testW, testH, Options{
+		Window: At(300, 260, 128), Margin: 64, Scales: []float64{8},
+		SearchRadius: 10, SearchGuard: 10,
+	})
+	if err == nil || !strings.Contains(err.Error(), "search guard") {
+		t.Fatalf("error = %v, want a search-guard message", err)
+	}
+}
