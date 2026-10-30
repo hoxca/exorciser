@@ -8,25 +8,26 @@ import (
 
 func TestNormalizeFilter(t *testing.T) {
 	tests := []struct {
+		name    string
 		in      string
 		want    string
 		wantErr bool
 	}{
-		{in: "L", want: "L"},
-		{in: "r", want: "R"},
-		{in: " FILTER-B ", want: "B"},
-		{in: "FILTER_h", want: "H"},
-		{in: "G", want: "G"},
-		{in: "S", want: "S"},
-		{in: "O", want: "O"},
-		{in: "", wantErr: true},
-		{in: "LR", wantErr: true},
-		{in: "X", wantErr: true},
-		{in: "FILTER-LIGHT", wantErr: true},
+		{name: "single letter", in: "L", want: "L"},
+		{name: "lowercase letter", in: "r", want: "R"},
+		{name: "hyphenated with spaces", in: " FILTER-B ", want: "B"},
+		{name: "underscore lowercase", in: "FILTER_h", want: "H"},
+		{name: "green", in: "G", want: "G"},
+		{name: "sulphur", in: "S", want: "S"},
+		{name: "oxygen", in: "O", want: "O"},
+		{name: "empty", in: "", wantErr: true},
+		{name: "two letters", in: "LR", wantErr: true},
+		{name: "unknown letter", in: "X", wantErr: true},
+		{name: "long invalid token", in: "FILTER-LIGHT", wantErr: true},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.in, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			got, err := normalizeFilter(tt.in)
 			if tt.wantErr {
 				if err == nil {
