@@ -103,6 +103,10 @@ seeded from the frame name and artefact number, so the result is reproducible.
 
 A per-artefact report is written to <products>/<filter>/inpaint.csv.
 
+Every frame rewritten by erase is saved as an uncompressed Float32 XISF with
+4096-byte block alignment, which PixInsight ImageIntegration needs for
+incremental reads. Clean and unlisted frames are copied unchanged.
+
 Passing clouds invalidate the local background sample: the resulting gradient
 leaves a visible disc.
 
@@ -781,11 +785,9 @@ func writeErasedFrame(path, template string, plane []float32) error {
 	return f.WriteFile(path, &xisf.WriteOptions{
 		UpdateCreationTime: true,
 		CreatorApplication: "exorciser",
-		Compression: &xisf.Compression{
-			Codec:    xisf.CodecZlib,
-			Shuffled: true,
-			ItemSize: 4,
-		},
+		// PixInsight's ImageIntegration needs uncompressed, 4096-byte
+		// aligned blocks for incremental reads.
+		Uncompressed: true,
 	})
 }
 

@@ -8,6 +8,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -487,5 +489,55 @@ func TestLocaliseWindowShrinksAtEdge(t *testing.T) {
 func TestLocaliseWindowRejectsCorner(t *testing.T) {
 	if _, _, _, err := localiseWindow(2, 2, 4096, 4096, 30, 24); err == nil {
 		t.Fatal("localiseWindow accepted a corner that cannot hold a background ring")
+	}
+}
+
+func TestWriteErasedFrameIsIncrementalReadable(t *testing.T) {
+	const w, h = 16, 16
+	template := filepath.Join(t.TempDir(), "template.xisf")
+	plane := make([]float32, w*h)
+	for i := range plane {
+		plane[i] = float32(i) / float32(w*h)
+	}
+	writeFloatXISF(t, template, w, h, plane)
+
+	out := filepath.Join(t.TempDir(), "erased.xisf")
+	if err := writeErasedFrame(out, template, plane); err != nil {
+		t.Fatalf("writeErasedFrame: %v", err)
+	}
+
+	f, err := xisf.Open(out)
+	if err != nil {
+		t.Fatalf("open output: %v", err)
+	}
+	header := string(f.HeaderXML())
+	imageTag := regexp.MustCompile(`(?s)<Image[^>]*>`).FindString(header)
+	if strings.Contains(imageTag, "compression=") {
+		t.Errorf("output image is compressed: %s", imageTag)
+	}
+	prop := regexp.MustCompile(`XISF:BlockAlignmentSize"[^>]*value="(\d+)"`).FindStringSubmatch(header)
+	if prop == nil || prop[1] != "4096" {
+		t.Errorf("XISF:BlockAlignmentSize = %v, want 4096", prop)
+	}
+	loc := regexp.MustCompile(`location="attachment:(\d+):`).FindStringSubmatch(imageTag)
+	if loc == nil {
+		t.Fatalf("no attachment location: %s", imageTag)
+	}
+	pos, err := strconv.Atoi(loc[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pos%4096 != 0 {
+		t.Errorf("attachment starts at %d, want a 4096-byte aligned offset", pos)
+	}
+
+	got, err := xisf.Plane[float32](f.Images()[0], 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range plane {
+		if got[i] != plane[i] {
+			t.Fatalf("pixel %d = %v, want %v", i, got[i], plane[i])
+		}
 	}
 }

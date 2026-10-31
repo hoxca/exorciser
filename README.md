@@ -400,6 +400,11 @@ By default the repaired frames are written to `output/registered/<filter>/`
 and the input frames are never modified. With `--inplace` the detected frames
 are replaced in place and nothing is written to the output directory.
 
+Every frame rewritten by `erase` is written as an uncompressed Float32 XISF
+with `XISF:BlockAlignmentSize` set to 4096. This is the layout PixInsight
+`ImageIntegration` needs for incremental reads. Clean and unlisted frames are
+still copied unchanged; they are assumed to be already compliant.
+
 **Warning: passing clouds break the repair.** Inpainting assumes the sky
 background is stable between the frame and the clean master. A passing cloud
 changes the background level and, more importantly, puts a gradient across the
