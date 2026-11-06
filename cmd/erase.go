@@ -27,16 +27,17 @@ import (
 )
 
 const (
-	eraseDefaultInput        = "img/registered"
-	eraseDefaultOutput       = "output/registered"
-	eraseDefaultProducts     = "output"
-	eraseDefaultRadius       = 12
-	eraseDefaultFeather      = 4
-	eraseDefaultSearchRadius = 24
-	eraseDefaultSearchGuard  = 4
-	eraseDefaultRadiusScale  = 2.5
-	eraseDefaultMinSNR       = 6
-	inpaintReportName        = "inpaint.csv"
+	eraseDefaultInput           = "img/registered"
+	eraseDefaultOutput          = "output/registered"
+	eraseDefaultProducts        = "output"
+	eraseDefaultRadius          = 12
+	eraseDefaultFeather         = 4
+	eraseDefaultSearchRadius    = 24
+	eraseDefaultSearchGuard     = 4
+	eraseDefaultRadiusScale     = 2.5
+	eraseDefaultMinSNR          = 6
+	inpaintRegisteredReportName = "inpaint_registered.csv"
+	inpaintCalibratedReportName = "inpaint_calibrated.csv"
 )
 
 type eraseOptions struct {
@@ -112,7 +113,9 @@ Cleaned source frames are written to <products>/calibrated/<filter> (or the
 with its SourceImage updated. With --inplace --drizzle, the source images are
 repaired in place and the XDRZ files are left untouched.
 
-A per-artefact report is written to <products>/<filter>/inpaint.csv.
+A per-artefact report is written to <products>/<filter>/inpaint_registered.csv.
+With --drizzle, the mapped source decisions are written to
+<products>/<filter>/inpaint_calibrated.csv.
 
 Every frame rewritten by erase is saved as an uncompressed Float32 XISF with
 4096-byte block alignment, which PixInsight ImageIntegration needs for
@@ -222,20 +225,26 @@ func (o *eraseOptions) validate() error {
 	return nil
 }
 
-// inpaintRecord is one localisation and repair decision for inpaint.csv.
+// inpaintRecord is one localisation and repair decision. The registered report
+// uses the first group of fields; the calibrated report uses Source*.
 type inpaintRecord struct {
-	Frame        string
-	Artefact     int
-	CatalogueX   int
-	CatalogueY   int
-	FoundX       int
-	FoundY       int
-	SNR          float64
-	Radius       int
-	RadiusSource string
-	Applied      bool
-	Calibration  string
-	Reason       string
+	Frame         string
+	Artefact      int
+	CatalogueX    int
+	CatalogueY    int
+	FoundX        int
+	FoundY        int
+	SNR           float64
+	Radius        int
+	RadiusSource  string
+	Applied       bool
+	Calibration   string
+	Reason        string
+	SourceImage   string
+	SourceX       int
+	SourceY       int
+	SourceApplied bool
+	SourceReason  string
 }
 
 func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
@@ -406,13 +415,20 @@ feed:
 		}
 	}
 
-	reportPath := filepath.Join(products, filter, inpaintReportName)
+	reportPath := filepath.Join(products, filter, inpaintRegisteredReportName)
 	var all []inpaintRecord
 	for _, rs := range records {
 		all = append(all, rs...)
 	}
 	if err := writeInpaintReport(reportPath, all); err != nil {
 		return err
+	}
+	var calibratedReportPath string
+	if opts.drizzle {
+		calibratedReportPath = filepath.Join(products, filter, inpaintCalibratedReportName)
+		if err := writeCalibratedReport(calibratedReportPath, all); err != nil {
+			return err
+		}
 	}
 
 	erased := 0
@@ -422,9 +438,13 @@ feed:
 		}
 	}
 	applied := 0
+	sourceApplied := 0
 	for _, rec := range all {
 		if rec.Applied {
 			applied++
+		}
+		if rec.SourceApplied {
+			sourceApplied++
 		}
 	}
 	done := []any{
@@ -434,7 +454,11 @@ feed:
 		"unchanged", len(paths) - erased,
 		"artefacts", len(artefacts),
 		"applied", applied,
+		"source_applied", sourceApplied,
 		"report", reportPath,
+	}
+	if calibratedReportPath != "" {
+		done = append(done, "calibrated_report", calibratedReportPath)
 	}
 	if opts.inplace {
 		done = append(done, "inplace", true)
@@ -535,12 +559,15 @@ func inpaintSource(source []float32, sw, sh int, clean []float32, cw, ch int,
 		return bilinearClean(clean, cw, ch, rx, ry)
 	}
 
-	for _, rec := range records {
+	for i := range records {
+		rec := &records[i]
 		if !rec.Applied {
 			continue
 		}
 		sx, sy := data.ToSource(float64(rec.FoundX), float64(rec.FoundY))
 		cx, cy := int(math.Round(sx)), int(math.Round(sy))
+		rec.SourceImage = seedName
+		rec.SourceX, rec.SourceY = cx, cy
 		radius := rec.Radius
 		if radius < 1 {
 			radius = opts.radius
@@ -549,12 +576,14 @@ func inpaintSource(source []float32, sw, sh int, clean []float32, cw, ch int,
 		outer := inner + 16
 		targetStats, err := erase.RingPlaneStats(source, sw, sh, cx, cy, inner, outer, nil)
 		if err != nil {
+			rec.SourceReason = err.Error()
 			slog.Debug("source target annulus unavailable; skipping artefact",
 				"file", seedName, "artefact", rec.Artefact, "err", err)
 			continue
 		}
 		cleanStats, err := erase.RingPlaneStatsSampled(cx, cy, inner, outer, sampler)
 		if err != nil {
+			rec.SourceReason = err.Error()
 			slog.Debug("source clean annulus unavailable; skipping artefact",
 				"file", seedName, "artefact", rec.Artefact, "err", err)
 			continue
@@ -574,6 +603,7 @@ func inpaintSource(source []float32, sw, sh int, clean []float32, cw, ch int,
 			return applied, fmt.Errorf("source artefact %d at (%d,%d): %w",
 				rec.Artefact, cx, cy, err)
 		}
+		rec.SourceApplied = true
 		applied++
 	}
 	return applied, nil
@@ -942,6 +972,49 @@ func writeInpaintReport(path string, records []inpaintRecord) error {
 			strconv.FormatBool(r.Applied),
 			r.Calibration,
 			r.Reason,
+		}
+		if err := cw.Write(row); err != nil {
+			_ = f.Close()
+			return err
+		}
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// writeCalibratedReport writes the source-image decisions for --drizzle.
+func writeCalibratedReport(path string, records []inpaintRecord) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create calibrated inpaint report: %w", err)
+	}
+	cw := csv.NewWriter(f)
+	cw.Comma = report.Separator
+	header := []string{"frame", "source", "artefact", "registered_x", "registered_y",
+		"source_x", "source_y", "radius", "applied", "reason"}
+	if err := cw.Write(header); err != nil {
+		_ = f.Close()
+		return err
+	}
+	for _, r := range records {
+		if !r.Applied {
+			continue
+		}
+		row := []string{
+			r.Frame,
+			r.SourceImage,
+			strconv.Itoa(r.Artefact),
+			strconv.Itoa(r.FoundX),
+			strconv.Itoa(r.FoundY),
+			strconv.Itoa(r.SourceX),
+			strconv.Itoa(r.SourceY),
+			strconv.Itoa(r.Radius),
+			strconv.FormatBool(r.SourceApplied),
+			r.SourceReason,
 		}
 		if err := cw.Write(row); err != nil {
 			_ = f.Close()

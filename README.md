@@ -384,11 +384,23 @@ star-mask pixels; if it is much noisier than the global background, the global
 rim. The noise is seeded from the frame name and
 artefact number, so repeated runs give the same result.
 
-Every decision is written to `output/<filter>/inpaint.csv`:
+Every registered decision is written to
+`output/<filter>/inpaint_registered.csv`:
 
 ```
 frame;artefact;catalogue_x;catalogue_y;found_x;found_y;snr;radius;radius_source;applied;calibration;reason
 ```
+
+With `--drizzle`, the mapped source decisions are written to
+`output/<filter>/inpaint_calibrated.csv`:
+
+```
+frame;source;artefact;registered_x;registered_y;source_x;source_y;radius;applied;reason
+```
+
+`frame` is the registered frame, `source` is the calibrated source file, and
+`applied` says whether the source could actually be repaired. Rows only appear
+for artefacts that passed the registered `min-snr` gate.
 
 `radius_source` is `profile` when the scaled profile support set the radius,
 `scale` when the Gaussian fallback did, and `fixed` when `--radius` was used.
@@ -511,7 +523,8 @@ a few pixels of the one for B, but measure it in each filter.
 | `output/<LRGBSHO...>/artefacts.csv` | Merged catalogue from `union`. |
 | `output/<LRGBSHO...>/background.csv` | Centre and sky statistics of the background window. |
 | `output/<LRGBSHO...>/<filter>_stack_detected.xisf` | Annotated image with yellow markers for missing artefacts and the background square. |
-| `output/<filter>/inpaint.csv` | Per-artefact localisation and repair report from `erase`. |
+| `output/<filter>/inpaint_registered.csv` | Per-artefact localisation and repair report from `erase`. |
+| `output/<filter>/inpaint_calibrated.csv` | Mapped source-image repair report from `erase --drizzle`. |
 | `output/registered/<filter>/<name>.xisf` | Repaired registered frames written by `erase`; clean frames are unchanged copies. |
 | `output/registered/<filter>/<name>.xdrz` | Drizzle sidecar with `SourceImage` pointing at the cleaned source frame. |
 | `output/calibrated/<filter>/<name>.xisf` | Cleaned source frames used by drizzle integration. |
@@ -661,7 +674,7 @@ it is missing from that report. Both are reported in the log.
 The frame has passing cloud or a steep background gradient, so the clean patch
 sits at the wrong local level. Exclude the frame and run `erase` again.
 
-**An artefact is listed in inpaint.csv but applied is false**
+**An artefact is listed in inpaint_registered.csv but applied is false**
 Check the `reason` column. `below min-snr` means the local peak was too weak for
 the threshold stored in `detect.json`; lower `--min-snr` to accept it. A
 window or fit error means the artefact is too close to the frame edge for the

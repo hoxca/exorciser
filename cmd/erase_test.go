@@ -114,6 +114,13 @@ func TestRunErase(t *testing.T) {
 		t.Fatalf("runErase: %v", err)
 	}
 
+	if _, err := os.Stat(filepath.Join(products, "L", inpaintRegisteredReportName)); err != nil {
+		t.Errorf("registered report missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(products, "L", inpaintCalibratedReportName)); !os.IsNotExist(err) {
+		t.Errorf("non-drizzle run wrote a calibrated report: %v", err)
+	}
+
 	outDir := filepath.Join(root, "out", "L")
 	for _, name := range []string{"a.xisf", "b.xisf", "c.xisf", "d.xisf"} {
 		if _, err := os.Stat(filepath.Join(outDir, name)); err != nil {
@@ -441,7 +448,7 @@ func TestRepairRadius(t *testing.T) {
 }
 
 func TestWriteInpaintReport(t *testing.T) {
-	path := filepath.Join(t.TempDir(), inpaintReportName)
+	path := filepath.Join(t.TempDir(), inpaintRegisteredReportName)
 	records := []inpaintRecord{
 		{Frame: "a.xisf", Artefact: 1, CatalogueX: 10, CatalogueY: 20,
 			FoundX: 11, FoundY: 19, SNR: 7.25, Radius: 22, RadiusSource: "profile", Applied: true, Calibration: "local"},
@@ -464,6 +471,39 @@ func TestWriteInpaintReport(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("report does not contain %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestWriteCalibratedReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), inpaintCalibratedReportName)
+	records := []inpaintRecord{
+		{Frame: "a.xisf", Artefact: 1, FoundX: 2466, FoundY: 1970, Radius: 20,
+			Applied: true, SourceImage: "a_c.xisf", SourceX: 2470, SourceY: 1975, SourceApplied: true},
+		{Frame: "a.xisf", Artefact: 2, FoundX: 2916, FoundY: 4057, Radius: 20,
+			Applied: true, SourceImage: "a_c.xisf", SourceX: 2922, SourceY: 4063,
+			SourceReason: "annulus outside the source frame"},
+		{Frame: "a.xisf", Artefact: 3, FoundX: 10, FoundY: 10, Radius: 20, Applied: false,
+			Reason: "below min-snr"},
+	}
+	if err := writeCalibratedReport(path, records); err != nil {
+		t.Fatalf("writeCalibratedReport: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"frame;source;artefact;registered_x;registered_y;source_x;source_y;radius;applied;reason\n",
+		"a.xisf;a_c.xisf;1;2466;1970;2470;1975;20;true;\n",
+		"a.xisf;a_c.xisf;2;2916;4057;2922;4063;20;false;annulus outside the source frame\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report does not contain %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "below min-snr") {
+		t.Error("calibrated report contains an artefact that was not applied")
 	}
 }
 
@@ -673,6 +713,22 @@ func TestRunEraseDrizzleSource(t *testing.T) {
 	if !strings.Contains(string(raw), "<SourceImage>"+absCleanCopy+"</SourceImage>") {
 		t.Errorf("clean copied xdrz does not point at %s", absCleanCopy)
 	}
+
+	registeredReport := filepath.Join(products, "L", inpaintRegisteredReportName)
+	if _, err := os.Stat(registeredReport); err != nil {
+		t.Errorf("registered report missing: %v", err)
+	}
+	calibratedReport := filepath.Join(products, "L", inpaintCalibratedReportName)
+	raw, err = os.ReadFile(calibratedReport)
+	if err != nil {
+		t.Fatalf("read calibrated report: %v", err)
+	}
+	if !strings.Contains(string(raw), ";a_c.xisf;1;") || !strings.Contains(string(raw), ";true;") {
+		t.Errorf("calibrated report does not contain the applied source row:\n%s", raw)
+	}
+	if _, err := os.Stat(filepath.Join(products, "L", "inpaint.csv")); !os.IsNotExist(err) {
+		t.Errorf("the old inpaint.csv was still written: %v", err)
+	}
 }
 
 func TestRunEraseDrizzleInplace(t *testing.T) {
@@ -779,6 +835,11 @@ func TestRunEraseDrizzleInplace(t *testing.T) {
 	}
 	if !bytes.Equal(xdrzBefore, xdrzAfter) {
 		t.Error("xdrz sidecar was changed by --drizzle --inplace")
+	}
+	for _, name := range []string{inpaintRegisteredReportName, inpaintCalibratedReportName} {
+		if _, err := os.Stat(filepath.Join(products, "L", name)); err != nil {
+			t.Errorf("%s missing: %v", name, err)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(root, "out")); !os.IsNotExist(err) {
 		t.Errorf("--drizzle --inplace wrote an output directory: %v", err)
