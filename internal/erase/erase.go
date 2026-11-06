@@ -196,84 +196,13 @@ func RingPlaneStats(plane []float32, w, h, cx, cy, inner, outer int, mask []bool
 		return LocalStats{}, fmt.Errorf("annulus centred at (%d,%d) of outer radius %d falls outside %d×%d",
 			cx, cy, outer, w, h)
 	}
-
-	inner2 := inner * inner
-	outer2 := outer * outer
-	us := make([]float64, 0, (2*outer+1)*(2*outer+1))
-	vs := make([]float64, 0, cap(us))
-	zs := make([]float64, 0, cap(us))
-	for y := cy - outer; y <= cy+outer; y++ {
-		dy := y - cy
-		line := y * w
-		for x := cx - outer; x <= cx+outer; x++ {
-			dx := x - cx
-			d2 := dx*dx + dy*dy
-			if d2 < inner2 || d2 > outer2 {
-				continue
-			}
-			i := line + x
-			if mask != nil && mask[i] {
-				continue
-			}
-			v := float64(plane[i])
-			if math.IsNaN(v) || math.IsInf(v, 0) {
-				continue
-			}
-			us = append(us, float64(dx))
-			vs = append(vs, float64(dy))
-			zs = append(zs, v)
+	return RingPlaneStatsSampled(cx, cy, inner, outer, func(x, y int) (float64, bool) {
+		i := y*w + x
+		if mask != nil && mask[i] {
+			return 0, false
 		}
-	}
-	if len(zs) < 50 {
-		return LocalStats{}, fmt.Errorf("only %d usable annulus pixels, need 50", len(zs))
-	}
-
-	keep := make([]bool, len(zs))
-	for i := range keep {
-		keep[i] = true
-	}
-	var p Plane
-	var residuals []float64
-	for iter := 0; iter < 3; iter++ {
-		var err error
-		p, err = solvePlane(us, vs, zs, keep)
-		if err != nil {
-			return LocalStats{}, err
-		}
-		residuals = residuals[:0]
-		for i := range zs {
-			if keep[i] {
-				residuals = append(residuals, zs[i]-p.At(us[i], vs[i]))
-			}
-		}
-		_, mad := robustSpread(residuals)
-		if mad == 0 {
-			break
-		}
-		limit := 3 * 1.4826 * mad
-		for i := range zs {
-			if keep[i] && math.Abs(zs[i]-p.At(us[i], vs[i])) > limit {
-				keep[i] = false
-			}
-		}
-	}
-	residuals = residuals[:0]
-	kept := 0
-	for i := range zs {
-		if keep[i] {
-			residuals = append(residuals, zs[i]-p.At(us[i], vs[i]))
-			kept++
-		}
-	}
-	if kept < 50 {
-		return LocalStats{}, fmt.Errorf("only %d annulus pixels survive clipping, need 50", kept)
-	}
-	_, mad := robustSpread(residuals)
-	noise := 1.4826 * mad
-	if noise <= 0 {
-		return LocalStats{}, errors.New("annulus has no noise")
-	}
-	return LocalStats{Plane: p, Noise: noise, Pixels: kept}, nil
+		return float64(plane[i]), true
+	})
 }
 
 func solvePlane(us, vs, zs []float64, keep []bool) (Plane, error) {
@@ -384,16 +313,117 @@ func Inpaint(dst, clean []float32, w, h, cx, cy, radius, feather int, cal Calibr
 	if len(dst) < w*h || len(clean) < w*h {
 		return fmt.Errorf("planes must hold at least %d samples", w*h)
 	}
+	return InpaintMapped(dst, w, h, cx, cy, radius, feather, cal,
+		func(x, y int) (float64, bool) { return float64(clean[y*w+x]), true }, rng)
+}
+
+// RingPlaneStatsSampled is RingPlaneStats for a clean reference that does not
+// share the target's pixel grid. sample returns the clean value and whether the
+// coordinate is usable.
+func RingPlaneStatsSampled(cx, cy, inner, outer int, sample func(x, y int) (float64, bool)) (LocalStats, error) {
+	if inner < 0 || outer <= inner {
+		return LocalStats{}, fmt.Errorf("annulus radii must satisfy 0 <= inner < outer, got %d and %d",
+			inner, outer)
+	}
+	if sample == nil {
+		return LocalStats{}, errors.New("no sampler")
+	}
+	inner2 := inner * inner
+	outer2 := outer * outer
+	us := make([]float64, 0, (2*outer+1)*(2*outer+1))
+	vs := make([]float64, 0, cap(us))
+	zs := make([]float64, 0, cap(us))
+	for y := cy - outer; y <= cy+outer; y++ {
+		dy := y - cy
+		for x := cx - outer; x <= cx+outer; x++ {
+			dx := x - cx
+			d2 := dx*dx + dy*dy
+			if d2 < inner2 || d2 > outer2 {
+				continue
+			}
+			v, ok := sample(x, y)
+			if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
+				continue
+			}
+			us = append(us, float64(dx))
+			vs = append(vs, float64(dy))
+			zs = append(zs, v)
+		}
+	}
+	if len(zs) < 50 {
+		return LocalStats{}, fmt.Errorf("only %d sampled annulus pixels, need 50", len(zs))
+	}
+	keep := make([]bool, len(zs))
+	for i := range keep {
+		keep[i] = true
+	}
+	var p Plane
+	var residuals []float64
+	for iter := 0; iter < 3; iter++ {
+		var err error
+		p, err = solvePlane(us, vs, zs, keep)
+		if err != nil {
+			return LocalStats{}, err
+		}
+		residuals = residuals[:0]
+		for i := range zs {
+			if keep[i] {
+				residuals = append(residuals, zs[i]-p.At(us[i], vs[i]))
+			}
+		}
+		_, mad := robustSpread(residuals)
+		if mad == 0 {
+			break
+		}
+		limit := 3 * 1.4826 * mad
+		for i := range zs {
+			if keep[i] && math.Abs(zs[i]-p.At(us[i], vs[i])) > limit {
+				keep[i] = false
+			}
+		}
+	}
+	residuals = residuals[:0]
+	kept := 0
+	for i := range zs {
+		if keep[i] {
+			residuals = append(residuals, zs[i]-p.At(us[i], vs[i]))
+			kept++
+		}
+	}
+	if kept < 50 {
+		return LocalStats{}, fmt.Errorf("only %d sampled annulus pixels survive clipping, need 50", kept)
+	}
+	_, mad := robustSpread(residuals)
+	noise := 1.4826 * mad
+	if noise <= 0 {
+		return LocalStats{}, errors.New("sampled annulus has no noise")
+	}
+	return LocalStats{Plane: p, Noise: noise, Pixels: kept}, nil
+}
+
+// InpaintMapped is Inpaint for a clean reference in a different pixel grid.
+// cleanAt returns the clean value at a target pixel coordinate.
+func InpaintMapped(dst []float32, w, h, cx, cy, radius, feather int, cal Calibration,
+	cleanAt func(x, y int) (float64, bool), rng *rand.Rand,
+) error {
+	if w <= 0 || h <= 0 {
+		return fmt.Errorf("image is %d×%d, want positive dimensions", w, h)
+	}
+	if len(dst) < w*h {
+		return fmt.Errorf("plane has %d samples, want at least %d", len(dst), w*h)
+	}
 	if radius < 1 {
 		return fmt.Errorf("radius must be positive, got %d", radius)
 	}
 	if feather < 0 || feather > radius {
 		return fmt.Errorf("feather must be between 0 and the radius %d, got %d", radius, feather)
 	}
+	if cleanAt == nil {
+		return errors.New("no clean sampler")
+	}
 	if rng == nil {
 		return errors.New("noise source is nil")
 	}
-
 	scale := cal.Scale
 	if scale == 0 {
 		scale = 1
@@ -403,12 +433,10 @@ func Inpaint(dst, clean []float32, w, h, cx, cy, radius, feather int, cal Calibr
 	if cal.TargetNoise > cleanNoise {
 		added = math.Sqrt(cal.TargetNoise*cal.TargetNoise - cleanNoise*cleanNoise)
 	}
-
 	r2 := radius * radius
 	inner := radius - feather
 	featherF := float64(feather)
 	for y := max(0, cy-radius); y <= min(h-1, cy+radius); y++ {
-		line := y * w
 		dy := y - cy
 		for x := max(0, cx-radius); x <= min(w-1, cx+radius); x++ {
 			dx := x - cx
@@ -416,7 +444,6 @@ func Inpaint(dst, clean []float32, w, h, cx, cy, radius, feather int, cal Calibr
 			if d2 > r2 {
 				continue
 			}
-
 			weight := 1.0
 			if feather > 0 {
 				d := math.Sqrt(float64(d2))
@@ -428,8 +455,6 @@ func Inpaint(dst, clean []float32, w, h, cx, cy, radius, feather int, cal Calibr
 			if weight <= 0 {
 				continue
 			}
-
-			i := line + x
 			dxf, dyf := float64(dx), float64(dy)
 			targetLevel := cal.TargetMean
 			if cal.TargetPlane != nil {
@@ -440,13 +465,12 @@ func Inpaint(dst, clean []float32, w, h, cx, cy, radius, feather int, cal Calibr
 				cleanLevel = cal.CleanPlane.At(dxf, dyf)
 			}
 			base := targetLevel
-			if v := float64(clean[i]); !math.IsNaN(v) && !math.IsInf(v, 0) {
+			if v, ok := cleanAt(x, y); ok && !math.IsNaN(v) && !math.IsInf(v, 0) {
 				base += scale * (v - cleanLevel)
 			}
 			value := base + rng.NormFloat64()*added
-
-			original := float64(dst[i])
-			dst[i] = float32((1-weight)*original + weight*value)
+			i := y*w + x
+			dst[i] = float32((1-weight)*float64(dst[i]) + weight*value)
 		}
 	}
 	return nil

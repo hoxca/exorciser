@@ -400,6 +400,17 @@ By default the repaired frames are written to `output/registered/<filter>/`
 and the input frames are never modified. With `--inplace` the detected frames
 are replaced in place and nothing is written to the output directory.
 
+With `--drizzle`, erase reads the XDRZ sidecar of each registered frame, finds
+its `SourceImage`, and repairs the artefact in that source image. The XDRZ
+`AlignmentMatrix` maps the registered position to the source position; 180°
+meridian-flip frames are handled by the same matrix. Cleaned source frames are
+written to `output/calibrated/<filter>/`, and clean or unlisted source frames
+are copied there unchanged. The XDRZ sidecar is copied beside the registered
+output frame with its `SourceImage` changed to the cleaned source path. Use
+`--calibrated` to choose a different cleaned-source root. With
+`--inplace --drizzle`, the source images are repaired in place and the XDRZ
+files are left untouched.
+
 Every frame rewritten by `erase` is written as an uncompressed Float32 XISF
 with `XISF:BlockAlignmentSize` set to 4096. This is the layout PixInsight
 `ImageIntegration` needs for incremental reads. Clean and unlisted frames are
@@ -422,6 +433,8 @@ Main options:
 | `-i` | Directory holding the frames, default `img/registered`. |
 | `-o` | Output root, default `output/registered`. |
 | `--inplace` | Rewrite detected frames in the input directory instead of copying them. |
+| `--drizzle` | Repair the XDRZ source images instead of only the registered frames. |
+| `--calibrated` | Root for cleaned source frames, default `output/calibrated`. |
 | `--filter` | Filter to repair. |
 | `--products` | Directory holding the scan, annotate and union results, default `output`. |
 | `--artefacts` | Union catalogue to use, when it is not the default. |
@@ -499,7 +512,9 @@ a few pixels of the one for B, but measure it in each filter.
 | `output/<LRGBSHO...>/background.csv` | Centre and sky statistics of the background window. |
 | `output/<LRGBSHO...>/<filter>_stack_detected.xisf` | Annotated image with yellow markers for missing artefacts and the background square. |
 | `output/<filter>/inpaint.csv` | Per-artefact localisation and repair report from `erase`. |
-| `output/registered/<filter>/<name>.xisf` | Repaired frames written by `erase`; clean frames are unchanged copies. |
+| `output/registered/<filter>/<name>.xisf` | Repaired registered frames written by `erase`; clean frames are unchanged copies. |
+| `output/registered/<filter>/<name>.xdrz` | Drizzle sidecar with `SourceImage` pointing at the cleaned source frame. |
+| `output/calibrated/<filter>/<name>.xisf` | Cleaned source frames used by drizzle integration. |
 
 Both CSV files use a semicolon as separator and a comma as decimal separator,
 so they open directly in a spreadsheet with the right numbers.

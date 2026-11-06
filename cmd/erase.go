@@ -21,6 +21,7 @@ import (
 	"github.com/hoxca/exorciser/internal/detect"
 	"github.com/hoxca/exorciser/internal/erase"
 	"github.com/hoxca/exorciser/internal/report"
+	"github.com/hoxca/exorciser/internal/xdrz"
 	"github.com/hoxca/xisf"
 	"github.com/spf13/cobra"
 )
@@ -55,6 +56,8 @@ type eraseOptions struct {
 	minSNR       float64
 	workers      int
 	inplace      bool
+	drizzle      bool
+	calibrated   string
 }
 
 func newEraseCmd() *cobra.Command {
@@ -100,6 +103,14 @@ noise. The local annulus excludes star-mask pixels; if it is much noisier than
 the global background, erase falls back to the global background window. A
 --feather pixel blend inside the rim hides the transition. The added noise is
 seeded from the frame name and artefact number, so the result is reproducible.
+
+With --drizzle, erase uses the XDRZ sidecar of each registered frame to find
+its source calibrated image. An artefact found in the registered frame is
+mapped into the source image with the XDRZ AlignmentMatrix and repaired there.
+Cleaned source frames are written to <products>/calibrated/<filter> (or the
+--calibrated root), and the XDRZ sidecar is copied beside the registered output
+with its SourceImage updated. With --inplace --drizzle, the source images are
+repaired in place and the XDRZ files are left untouched.
 
 A per-artefact report is written to <products>/<filter>/inpaint.csv.
 
@@ -160,6 +171,10 @@ Output defaults to output/registered/<filter>/.`,
 		"number of frames decoded and written concurrently")
 	flags.BoolVar(&opts.inplace, "inplace", false,
 		"rewrite the detected frames in the input directory instead of copying them")
+	flags.BoolVar(&opts.drizzle, "drizzle", false,
+		"inpaint the XDRZ source images instead of only the registered frames")
+	flags.StringVar(&opts.calibrated, "calibrated", "",
+		"root directory for cleaned source frames (default <products>/calibrated)")
 	return cmd
 }
 
@@ -197,6 +212,9 @@ func (o *eraseOptions) validate() error {
 	}
 	if o.minSNR < 0 || math.IsNaN(o.minSNR) || math.IsInf(o.minSNR, 0) {
 		return fmt.Errorf("--min-snr must not be negative, got %v", o.minSNR)
+	}
+	if o.calibrated != "" && !o.drizzle {
+		return errors.New("--calibrated requires --drizzle")
 	}
 	if o.workers < 1 {
 		return fmt.Errorf("--workers must be positive, got %d", o.workers)
@@ -319,11 +337,21 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 			"frames", unlisted)
 	}
 
-	var outDir string
+	var outDir, calibratedDir string
 	if !opts.inplace {
 		outDir = filepath.Join(opts.output, filter)
 		if err := os.MkdirAll(outDir, 0o755); err != nil {
 			return fmt.Errorf("create output directory: %w", err)
+		}
+		if opts.drizzle {
+			root := opts.calibrated
+			if root == "" {
+				root = filepath.Join(products, "calibrated")
+			}
+			calibratedDir = filepath.Join(root, filter)
+			if err := os.MkdirAll(calibratedDir, 0o755); err != nil {
+				return fmt.Errorf("create calibrated output directory: %w", err)
+			}
 		}
 	}
 
@@ -337,6 +365,8 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 		"radius", opts.radius,
 		"radius_scale", opts.radiusScale,
 		"profile", baseProfile != nil,
+		"drizzle", opts.drizzle,
+		"calibrated", calibratedDir,
 		"inplace", opts.inplace,
 		"background", backgroundPath,
 		"clean", cleanPath)
@@ -351,7 +381,7 @@ func runErase(ctx context.Context, roots []string, opts *eraseOptions) error {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				modified[i], records[i], errs[i] = eraseFrame(ctx, paths[i], outDir, detected,
+				modified[i], records[i], errs[i] = eraseFrame(ctx, paths[i], outDir, calibratedDir, detected,
 					w, h, cleanPlane, cleanStats, background, artefacts, starMask, baseProfile, minSNR, opts)
 			}
 		}()
@@ -457,9 +487,101 @@ func readEraseProfile(products, filter string) (*detect.Profile, error) {
 	return &p, nil
 }
 
+// drizzleSidecar returns the XDRZ file paired with a registered XISF.
+func drizzleSidecar(src string) string {
+	return strings.TrimSuffix(src, filepath.Ext(src)) + ".xdrz"
+}
+
+// copyDrizzleSidecar writes a sidecar whose SourceImage points at sourceDest.
+func copyDrizzleSidecar(srcXDRZ, outDir, sourceDest string) error {
+	abs, err := filepath.Abs(sourceDest)
+	if err != nil {
+		return err
+	}
+	dest := filepath.Join(outDir, filepath.Base(srcXDRZ))
+	if err := xdrz.CopyWithSource(srcXDRZ, dest, abs); err != nil {
+		return fmt.Errorf("copy drizzle sidecar %s: %w", filepath.Base(srcXDRZ), err)
+	}
+	return nil
+}
+
+// bilinearClean samples a registered clean plane at a fractional coordinate.
+func bilinearClean(plane []float32, w, h int, x, y float64) (float64, bool) {
+	if x < 0 || y < 0 || x > float64(w-1) || y > float64(h-1) {
+		return 0, false
+	}
+	x0, y0 := int(math.Floor(x)), int(math.Floor(y))
+	x1, y1 := min(x0+1, w-1), min(y0+1, h-1)
+	tx, ty := x-float64(x0), y-float64(y0)
+	row0, row1 := y0*w, y1*w
+	top := float64(plane[row0+x0])*(1-tx) + float64(plane[row0+x1])*tx
+	bottom := float64(plane[row1+x0])*(1-tx) + float64(plane[row1+x1])*tx
+	return top*(1-ty) + bottom*ty, true
+}
+
+// inpaintSource repairs the accepted registered artefacts in the XDRZ source
+// image. The clean master is in registered geometry and is sampled through the
+// inverse XDRZ matrix.
+func inpaintSource(source []float32, sw, sh int, clean []float32, cw, ch int,
+	data xdrz.Data, records []inpaintRecord, affine detect.Affine, opts *eraseOptions, seedName string,
+) (int, error) {
+	applied := 0
+	scale := affine.A
+	if scale <= 0 || math.IsNaN(scale) || math.IsInf(scale, 0) {
+		scale = 1
+	}
+	sampler := func(x, y int) (float64, bool) {
+		rx, ry := data.ToTarget(float64(x), float64(y))
+		return bilinearClean(clean, cw, ch, rx, ry)
+	}
+
+	for _, rec := range records {
+		if !rec.Applied {
+			continue
+		}
+		sx, sy := data.ToSource(float64(rec.FoundX), float64(rec.FoundY))
+		cx, cy := int(math.Round(sx)), int(math.Round(sy))
+		radius := rec.Radius
+		if radius < 1 {
+			radius = opts.radius
+		}
+		inner := radius + opts.feather + 2
+		outer := inner + 16
+		targetStats, err := erase.RingPlaneStats(source, sw, sh, cx, cy, inner, outer, nil)
+		if err != nil {
+			slog.Debug("source target annulus unavailable; skipping artefact",
+				"file", seedName, "artefact", rec.Artefact, "err", err)
+			continue
+		}
+		cleanStats, err := erase.RingPlaneStatsSampled(cx, cy, inner, outer, sampler)
+		if err != nil {
+			slog.Debug("source clean annulus unavailable; skipping artefact",
+				"file", seedName, "artefact", rec.Artefact, "err", err)
+			continue
+		}
+		cal := erase.Calibration{
+			TargetMean:  targetStats.Plane.C0,
+			TargetNoise: targetStats.Noise,
+			TargetPlane: &targetStats.Plane,
+			CleanMean:   cleanStats.Plane.C0,
+			CleanNoise:  cleanStats.Noise,
+			CleanPlane:  &cleanStats.Plane,
+			Scale:       scale,
+		}
+		rng := rand.New(rand.NewSource(eraseSeed(seedName, rec.Artefact)))
+		if err := erase.InpaintMapped(source, sw, sh, cx, cy, radius, opts.feather,
+			cal, sampler, rng); err != nil {
+			return applied, fmt.Errorf("source artefact %d at (%d,%d): %w",
+				rec.Artefact, cx, cy, err)
+		}
+		applied++
+	}
+	return applied, nil
+}
+
 // eraseFrame copies an undetected frame or locates and repairs every catalogue
 // artefact in a detected one.
-func eraseFrame(ctx context.Context, src, outDir string, detected map[string]bool,
+func eraseFrame(ctx context.Context, src, outDir, calibratedDir string, detected map[string]bool,
 	w, h int, cleanPlane []float32, cleanStats erase.Stats,
 	background report.Background, artefacts []report.Artefact,
 	starMask []bool, baseProfile *detect.Profile, minSNR float64, opts *eraseOptions,
@@ -469,11 +591,40 @@ func eraseFrame(ctx context.Context, src, outDir string, detected map[string]boo
 	if opts.inplace {
 		dest = src
 	}
+	if opts.drizzle && opts.inplace && !detected[name] {
+		// Source and sidecar stay exactly where they are.
+		return false, nil, nil
+	}
+
+	var drizzleData *xdrz.Data
+	var sourcePath, xdrzPath string
+	if opts.drizzle {
+		xdrzPath = drizzleSidecar(src)
+		data, err := xdrz.Read(xdrzPath)
+		if err != nil {
+			return false, nil, fmt.Errorf("read %s: %w", filepath.Base(xdrzPath), err)
+		}
+		drizzleData = &data
+		sourcePath = data.SourceImage
+	}
+
 	if !detected[name] {
 		if opts.inplace {
 			return false, nil, nil
 		}
-		return false, nil, copyFile(src, dest)
+		if err := copyFile(src, dest); err != nil {
+			return false, nil, err
+		}
+		if opts.drizzle {
+			sourceDest := filepath.Join(calibratedDir, filepath.Base(sourcePath))
+			if err := copyFile(sourcePath, sourceDest); err != nil {
+				return false, nil, err
+			}
+			if err := copyDrizzleSidecar(xdrzPath, outDir, sourceDest); err != nil {
+				return false, nil, err
+			}
+		}
+		return false, nil, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return false, nil, err
@@ -582,28 +733,85 @@ func eraseFrame(ctx context.Context, src, outDir string, detected map[string]boo
 		records = append(records, rec)
 	}
 
-	if applied == 0 {
-		if opts.inplace {
-			return false, records, nil
+	registeredModified := false
+	if !opts.drizzle || !opts.inplace {
+		if applied == 0 {
+			if !opts.inplace {
+				if err := copyFile(src, dest); err != nil {
+					return false, records, err
+				}
+			}
+		} else {
+			if err := writeErasedFrame(dest, src, plane); err != nil {
+				return false, records, err
+			}
+			if opts.inplace {
+				if err := os.Chmod(dest, mode); err != nil {
+					return false, records, err
+				}
+			}
+			registeredModified = true
 		}
-		return false, records, copyFile(src, dest)
 	}
-	if err := writeErasedFrame(dest, src, plane); err != nil {
-		return false, records, err
-	}
-	if opts.inplace {
-		// WriteFile creates its temporary file with mode 0600; restore the
-		// source permissions that the rename replaced.
-		if err := os.Chmod(dest, mode); err != nil {
-			return false, records, err
+
+	sourceModified := false
+	if opts.drizzle {
+		sourceDest := sourcePath
+		if !opts.inplace {
+			sourceDest = filepath.Join(calibratedDir, filepath.Base(sourcePath))
+		}
+		sourceApplied := 0
+		if applied > 0 {
+			sourcePlane, sw, sh, err := loadPlane(sourcePath)
+			if err != nil {
+				return false, records, fmt.Errorf("load source image: %w", err)
+			}
+			sourceApplied, err = inpaintSource(sourcePlane, sw, sh, cleanPlane, w, h,
+				*drizzleData, records, affine, opts, filepath.Base(sourcePath))
+			if err != nil {
+				return false, records, err
+			}
+			if sourceApplied > 0 {
+				var sourceMode os.FileMode
+				if opts.inplace {
+					info, err := os.Stat(sourcePath)
+					if err != nil {
+						return false, records, err
+					}
+					sourceMode = info.Mode().Perm()
+				}
+				if err := writeErasedFrame(sourceDest, sourcePath, sourcePlane); err != nil {
+					return false, records, fmt.Errorf("write source image: %w", err)
+				}
+				if opts.inplace {
+					if err := os.Chmod(sourceDest, sourceMode); err != nil {
+						return false, records, err
+					}
+				}
+				sourceModified = true
+				slog.Debug("source frame erased",
+					"file", name, "source", filepath.Base(sourcePath), "artefacts", sourceApplied)
+			}
+		}
+		if !sourceModified && !opts.inplace {
+			if err := copyFile(sourcePath, sourceDest); err != nil {
+				return false, records, err
+			}
+		}
+		if !opts.inplace {
+			if err := copyDrizzleSidecar(xdrzPath, outDir, sourceDest); err != nil {
+				return false, records, err
+			}
 		}
 	}
+
 	slog.Debug("frame erased",
 		"file", name,
 		"artefacts", applied,
+		"source_artefacts", sourceModified,
 		"mean", targetGlobal.Mean,
 		"noise", targetGlobal.Noise)
-	return true, records, nil
+	return registeredModified || sourceModified, records, nil
 }
 
 // localiseWindow picks the largest local window and background margin that
@@ -838,6 +1046,9 @@ func copyFile(src, dest string) error {
 	info, err := in.Stat()
 	if err != nil {
 		return err
+	}
+	if destInfo, err := os.Stat(dest); err == nil && os.SameFile(info, destInfo) {
+		return nil
 	}
 	out, err := os.Create(dest)
 	if err != nil {

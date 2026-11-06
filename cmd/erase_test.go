@@ -541,3 +541,325 @@ func TestWriteErasedFrameIsIncrementalReadable(t *testing.T) {
 		}
 	}
 }
+
+func TestRunEraseDrizzleSource(t *testing.T) {
+	const w, h = 256, 256
+	const cx, cy = 128, 128
+
+	root := t.TempDir()
+	products := filepath.Join(root, "products")
+	input := filepath.Join(root, "registered", "Light_FILTER-L_mono")
+	sourceDir := filepath.Join(root, "calibrated", "Light_FILTER-L_mono")
+	for _, dir := range []string{input, sourceDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	catalogue := []report.Artefact{{N: 1, X: cx, Y: cy, SNR: 10, Scale: 8}}
+	for _, filter := range []string{"L", "R"} {
+		writeUnionCatalogue(t, products, filter, catalogue)
+	}
+	writeUnionCatalogue(t, products, "LR", catalogue)
+	writeUnionBackground(t, products, "LR", report.Background{
+		Filter: "L", X: 20, Y: 20, Size: 21,
+		Mean: 0.01, Noise: 0.001, SNR: 10, Pixels: 441,
+	})
+
+	clean := eraseTestSky(w, h, 0.01, 0.001, 1)
+	writeFloatXISF(t, filepath.Join(products, "L", stackFileName(stackCleanKind, "L")), w, h, clean)
+
+	registered := eraseTargetFromClean(clean, 0.01, 10)
+	addEraseGhost(registered, w, cx, cy, 0.004, 4)
+	writeFloatXISF(t, filepath.Join(input, "a.xisf"), w, h, registered)
+
+	const sourceName = "a_c.xisf"
+	sourcePath := filepath.Join(sourceDir, sourceName)
+	writeFloatXISF(t, sourcePath, w, h, registered)
+
+	absSource, err := filepath.Abs(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xdrzText := `<?xml version="1.0" encoding="UTF-8"?>
+<xdrz version="1.1" xmlns="http://www.pixinsight.com/xdrz">
+<SourceImage>` + absSource + `</SourceImage>
+<AlignmentTargetImage>/registered/a.xisf</AlignmentTargetImage>
+<ReferenceGeometry width="256" height="256" numberOfChannels="1"/>
+<AlignmentOrigin x="0.5" y="0.5"/>
+<AlignmentMatrix>1,0,0,0,1,0,0,0,1</AlignmentMatrix>
+</xdrz>`
+	xdrzPath := filepath.Join(input, "a.xdrz")
+	if err := os.WriteFile(xdrzPath, []byte(xdrzText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A clean registered frame and its source must be copied, with its own
+	// sidecar updated, even though no inpainting happens.
+	cleanRegistered := eraseTargetFromClean(clean, 0.01, 11)
+	writeFloatXISF(t, filepath.Join(input, "b.xisf"), w, h, cleanRegistered)
+	cleanSourceName := "b_c.xisf"
+	cleanSourcePath := filepath.Join(sourceDir, cleanSourceName)
+	writeFloatXISF(t, cleanSourcePath, w, h, cleanRegistered)
+	absCleanSource, err := filepath.Abs(cleanSourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanXDRZ := strings.ReplaceAll(xdrzText, absSource, absCleanSource)
+	if err := os.WriteFile(filepath.Join(input, "b.xdrz"), []byte(cleanXDRZ), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeDetectionReport(t, filepath.Join(products, "L", detectionName), []report.Row{
+		{File: "a.xisf", Detected: true, Width: w, Height: h, PeakSNR: 20},
+		{File: "b.xisf", Detected: false, Width: w, Height: h, PeakSNR: 2},
+	})
+
+	opts := &eraseOptions{
+		input:        input,
+		output:       filepath.Join(root, "out"),
+		products:     products,
+		radius:       8,
+		feather:      2,
+		searchRadius: 24,
+		workers:      1,
+		drizzle:      true,
+	}
+	if err := runErase(context.Background(), []string{input}, opts); err != nil {
+		t.Fatalf("runErase: %v", err)
+	}
+
+	cleanSource := filepath.Join(products, "calibrated", "L", sourceName)
+	plane, sw, sh, err := loadPlane(cleanSource)
+	if err != nil {
+		t.Fatalf("load cleaned source: %v", err)
+	}
+	if sw != w || sh != h {
+		t.Fatalf("cleaned source is %d×%d, want %dx%d", sw, sh, w, h)
+	}
+	if got := plane[cy*w+cx]; got > 0.03 {
+		t.Errorf("cleaned source artefact centre = %v, want the ghost removed", got)
+	}
+
+	copyXDRZ := filepath.Join(root, "out", "L", "a.xdrz")
+	raw, err := os.ReadFile(copyXDRZ)
+	if err != nil {
+		t.Fatalf("read copied xdrz: %v", err)
+	}
+	absClean, err := filepath.Abs(cleanSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "<SourceImage>"+absClean+"</SourceImage>") {
+		t.Errorf("copied xdrz SourceImage does not point at %s", absClean)
+	}
+	if _, err := os.Stat(filepath.Join(root, "out", "L", "a.xisf")); err != nil {
+		t.Errorf("registered output missing: %v", err)
+	}
+
+	cleanCopy := filepath.Join(products, "calibrated", "L", cleanSourceName)
+	if _, err := os.Stat(cleanCopy); err != nil {
+		t.Errorf("clean source copy missing: %v", err)
+	}
+	cleanCopyXDRZ := filepath.Join(root, "out", "L", "b.xdrz")
+	raw, err = os.ReadFile(cleanCopyXDRZ)
+	if err != nil {
+		t.Fatalf("read clean copied xdrz: %v", err)
+	}
+	absCleanCopy, err := filepath.Abs(cleanCopy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "<SourceImage>"+absCleanCopy+"</SourceImage>") {
+		t.Errorf("clean copied xdrz does not point at %s", absCleanCopy)
+	}
+}
+
+func TestRunEraseDrizzleInplace(t *testing.T) {
+	const w, h = 256, 256
+	const cx, cy = 128, 128
+
+	root := t.TempDir()
+	products := filepath.Join(root, "products")
+	input := filepath.Join(root, "registered", "Light_FILTER-L_mono")
+	sourceDir := filepath.Join(root, "calibrated", "Light_FILTER-L_mono")
+	for _, dir := range []string{input, sourceDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	catalogue := []report.Artefact{{N: 1, X: cx, Y: cy, SNR: 10, Scale: 8}}
+	for _, filter := range []string{"L", "R"} {
+		writeUnionCatalogue(t, products, filter, catalogue)
+	}
+	writeUnionCatalogue(t, products, "LR", catalogue)
+	writeUnionBackground(t, products, "LR", report.Background{
+		Filter: "L", X: 20, Y: 20, Size: 21,
+		Mean: 0.01, Noise: 0.001, SNR: 10, Pixels: 441,
+	})
+
+	clean := eraseTestSky(w, h, 0.01, 0.001, 1)
+	writeFloatXISF(t, filepath.Join(products, "L", stackFileName(stackCleanKind, "L")), w, h, clean)
+
+	registered := eraseTargetFromClean(clean, 0.01, 10)
+	addEraseGhost(registered, w, cx, cy, 0.004, 4)
+	registeredPath := filepath.Join(input, "a.xisf")
+	writeFloatXISF(t, registeredPath, w, h, registered)
+	registeredBefore, err := os.ReadFile(registeredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sourceName := "a_c.xisf"
+	sourcePath := filepath.Join(sourceDir, sourceName)
+	writeFloatXISF(t, sourcePath, w, h, registered)
+
+	absSource, err := filepath.Abs(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xdrzText := `<?xml version="1.0" encoding="UTF-8"?>
+<xdrz version="1.1" xmlns="http://www.pixinsight.com/xdrz">
+<SourceImage>` + absSource + `</SourceImage>
+<AlignmentTargetImage>/registered/a.xisf</AlignmentTargetImage>
+<ReferenceGeometry width="256" height="256" numberOfChannels="1"/>
+<AlignmentOrigin x="0.5" y="0.5"/>
+<AlignmentMatrix>1,0,0,0,1,0,0,0,1</AlignmentMatrix>
+</xdrz>`
+	xdrzPath := filepath.Join(input, "a.xdrz")
+	if err := os.WriteFile(xdrzPath, []byte(xdrzText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	xdrzBefore, err := os.ReadFile(xdrzPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeDetectionReport(t, filepath.Join(products, "L", detectionName), []report.Row{
+		{File: "a.xisf", Detected: true, Width: w, Height: h, PeakSNR: 20},
+	})
+
+	opts := &eraseOptions{
+		input:        input,
+		output:       filepath.Join(root, "out"),
+		products:     products,
+		radius:       8,
+		feather:      2,
+		searchRadius: 24,
+		workers:      1,
+		drizzle:      true,
+		inplace:      true,
+	}
+	if err := runErase(context.Background(), []string{input}, opts); err != nil {
+		t.Fatalf("runErase: %v", err)
+	}
+
+	source, sw, sh, err := loadPlane(sourcePath)
+	if err != nil {
+		t.Fatalf("load source: %v", err)
+	}
+	if sw != w || sh != h {
+		t.Fatalf("source is %d×%d, want %dx%d", sw, sh, w, h)
+	}
+	if got := source[cy*w+cx]; got > 0.03 {
+		t.Errorf("source artefact centre = %v, want the ghost removed", got)
+	}
+
+	registeredAfter, err := os.ReadFile(registeredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(registeredBefore, registeredAfter) {
+		t.Error("registered input was rewritten by --drizzle --inplace")
+	}
+	xdrzAfter, err := os.ReadFile(xdrzPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(xdrzBefore, xdrzAfter) {
+		t.Error("xdrz sidecar was changed by --drizzle --inplace")
+	}
+	if _, err := os.Stat(filepath.Join(root, "out")); !os.IsNotExist(err) {
+		t.Errorf("--drizzle --inplace wrote an output directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(products, "calibrated")); !os.IsNotExist(err) {
+		t.Errorf("--drizzle --inplace wrote a calibrated directory: %v", err)
+	}
+}
+
+func TestRunEraseInPlaceNoApplied(t *testing.T) {
+	const w, h = 128, 128
+	const artX, artY = 64, 64
+
+	root := t.TempDir()
+	products := filepath.Join(root, "products")
+	input := filepath.Join(root, "registered", "Light_FILTER-L_mono")
+	if err := os.MkdirAll(input, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	catalogue := []report.Artefact{{N: 1, X: artX, Y: artY, SNR: 10, Scale: 8}}
+	for _, filter := range []string{"L", "R"} {
+		writeUnionCatalogue(t, products, filter, catalogue)
+	}
+	writeUnionCatalogue(t, products, "LR", catalogue)
+	writeUnionBackground(t, products, "LR", report.Background{
+		Filter: "L", X: 20, Y: 20, Size: 21,
+		Mean: 0.01, Noise: 0.001, SNR: 10, Pixels: 441,
+	})
+	clean := eraseTestSky(w, h, 0.01, 0.001, 1)
+	writeFloatXISF(t, filepath.Join(products, "L", stackFileName(stackCleanKind, "L")), w, h, clean)
+
+	plane := eraseTargetFromClean(clean, 0.01, 10)
+	addEraseGhost(plane, w, artX, artY, 0.05, 4)
+	frame := filepath.Join(input, "a.xisf")
+	writeFloatXISF(t, frame, w, h, plane)
+	before, err := os.ReadFile(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDetectionReport(t, filepath.Join(products, "L", detectionName), []report.Row{
+		{File: "a.xisf", Detected: true, Width: w, Height: h, PeakSNR: 20},
+	})
+
+	opts := &eraseOptions{
+		input:        input,
+		output:       filepath.Join(root, "out"),
+		products:     products,
+		radius:       8,
+		feather:      2,
+		searchRadius: 24,
+		workers:      1,
+		minSNR:       1000,
+		inplace:      true,
+	}
+	if err := runErase(context.Background(), []string{input}, opts); err != nil {
+		t.Fatalf("runErase: %v", err)
+	}
+	after, err := os.ReadFile(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("an in-place frame with no applied artefact was rewritten")
+	}
+}
+
+func TestCopyFileSamePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "frame.xisf")
+	want := []byte("not really a fits file")
+	if err := os.WriteFile(path, want, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyFile(path, path); err != nil {
+		t.Fatalf("copyFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("copying a file onto itself changed it: %q", got)
+	}
+}
