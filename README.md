@@ -408,9 +408,10 @@ for artefacts that passed the registered `min-snr` gate.
 `global` when the `background.csv` window was the fallback, and empty for a
 skipped artefact. `reason` explains the skip.
 
-By default the repaired frames are written to `output/registered/<filter>/`
-and the input frames are never modified. With `--inplace` the detected frames
-are replaced in place and nothing is written to the output directory.
+By default the repaired registered frames are written to
+`output/registered/<filter>/` and the input frames are never modified. With
+`--inplace` the detected frames are replaced in place and nothing is written to
+the output directory.
 
 With `--drizzle`, erase reads the XDRZ sidecar of each registered frame, finds
 its `SourceImage`, and repairs the artefact in that source image. The XDRZ
@@ -418,10 +419,11 @@ its `SourceImage`, and repairs the artefact in that source image. The XDRZ
 meridian-flip frames are handled by the same matrix. Cleaned source frames are
 written to `output/calibrated/<filter>/`, and clean or unlisted source frames
 are copied there unchanged. The XDRZ sidecar is copied beside the registered
-output frame with its `SourceImage` changed to the cleaned source path. Use
-`--calibrated` to choose a different cleaned-source root. With
-`--inplace --drizzle`, the source images are repaired in place and the XDRZ
-files are left untouched.
+output frame with its `SourceImage` changed to the cleaned source path. The
+cleaned-source root follows `--products` (`<products>/calibrated`), so it is
+`output/calibrated/<filter>/` by default; use `--calibrated` to override it.
+With `--inplace --drizzle`, the source images are repaired in place and the
+XDRZ files are left untouched.
 
 Every frame rewritten by `erase` is written as an uncompressed Float32 XISF
 with `XISF:BlockAlignmentSize` set to 4096. This is the layout PixInsight
@@ -445,8 +447,8 @@ Main options:
 | `-i` | Directory holding the frames, default `img/registered`. |
 | `-o` | Output root, default `output/registered`. |
 | `--inplace` | Rewrite detected frames in the input directory instead of copying them. |
-| `--drizzle` | Repair the XDRZ source images instead of only the registered frames. |
-| `--calibrated` | Root for cleaned source frames, default `output/calibrated`. |
+| `--drizzle` | Repair the XDRZ source images instead of only the registered frames; cleaned sources default to `output/calibrated/<filter>`. |
+| `--calibrated` | Root for cleaned source frames, default `<products>/calibrated` (`output/calibrated`). |
 | `--filter` | Filter to repair. |
 | `--products` | Directory holding the scan, annotate and union results, default `output`. |
 | `--artefacts` | Union catalogue to use, when it is not the default. |

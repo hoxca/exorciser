@@ -105,12 +105,14 @@ the global background, erase falls back to the global background window. A
 --feather pixel blend inside the rim hides the transition. The added noise is
 seeded from the frame name and artefact number, so the result is reproducible.
 
-With --drizzle, erase uses the XDRZ sidecar of each registered frame to find
-its source calibrated image. An artefact found in the registered frame is
-mapped into the source image with the XDRZ AlignmentMatrix and repaired there.
-Cleaned source frames are written to <products>/calibrated/<filter> (or the
---calibrated root), and the XDRZ sidecar is copied beside the registered output
-with its SourceImage updated. With --inplace --drizzle, the source images are
+The repaired registered frames are written to output/registered/<filter>/.
+With --drizzle, erase uses the XDRZ sidecar of each registered frame to find its
+source calibrated image. An artefact found in the registered frame is mapped
+into the source image with the XDRZ AlignmentMatrix and repaired there. Cleaned
+source frames are written to <products>/calibrated/<filter>/ (which is
+output/calibrated/<filter>/ with the default --products), or under the
+--calibrated root. The XDRZ sidecar is copied beside the registered output with
+its SourceImage updated. With --inplace --drizzle, the source images are
 repaired in place and the XDRZ files are left untouched.
 
 A per-artefact report is written to <products>/<filter>/inpaint_registered.csv.
@@ -175,9 +177,9 @@ Output defaults to output/registered/<filter>/.`,
 	flags.BoolVar(&opts.inplace, "inplace", false,
 		"rewrite the detected frames in the input directory instead of copying them")
 	flags.BoolVar(&opts.drizzle, "drizzle", false,
-		"inpaint the XDRZ source images instead of only the registered frames")
+		"inpaint the XDRZ source images (cleaned sources default to output/calibrated/<filter>)")
 	flags.StringVar(&opts.calibrated, "calibrated", "",
-		"root directory for cleaned source frames (default <products>/calibrated)")
+		"root directory for cleaned source frames (default <products>/calibrated, i.e. output/calibrated)")
 	return cmd
 }
 
