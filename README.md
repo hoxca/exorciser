@@ -1,7 +1,8 @@
 # exorciser
 
-exorciser finds faint ghost artefacts in astronomical images: the soft, diffuse
-reflections and stray-light patches that survive stacking and are hard to see
+exorciser finds faint ghost artefacts in astronomical images: it was design
+to process some residual bulk image produced by a KAF16803 sensor that leave
+blurry stars from the focus field that survive rejection stacking and are hard to see
 by eye. It takes star-aligned light frames, uses one visible artefact as a
 starting point, measures it in every frame, and then catalogues every other
 artefact of the same kind in the image.
