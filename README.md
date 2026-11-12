@@ -190,6 +190,7 @@ matched amplitude, which removes stars and sharp defects. Start with a higher
 `--min-snr` than you used for the Gaussian scan and inspect `artefacts.csv`
 before feeding it to `annotate` or `union`.
 
+Usually i store the command line used in `output/cmd` for later use:
 Examples (from `output/cmd/L_scan.sh` and `output/cmd/B_scan.sh`):
 
 ```
